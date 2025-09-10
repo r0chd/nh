@@ -83,7 +83,7 @@ all with their extensive CLI flags for extensive configuration.
 
 ### Global Subcommands
 
-- `nh search` - a super-fast package searching tool (powered by an ElasticSearch
+- `nh search` - a super-fast package searching tool (powered by an Elasticsearch
   client) for Nix packages in supported Nixpkgs branches.
   <p align="center">
     <img
@@ -141,7 +141,7 @@ nix shell nixpkgs#nh # stable
 nix shell github:nix-community/nh # dev
 ```
 
-You can try NH today in a Nix shell today, no setup required!
+You can try NH in a Nix shell today, no setup required!
 
 ### NixOS
 
