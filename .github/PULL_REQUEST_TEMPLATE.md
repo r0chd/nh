@@ -20,7 +20,7 @@ If your pull request includes any change or unexpected behaviour not covered bel
 please do make sure to include it above in your description.
 -->
 
-[changelog]: https://github.com/nix-community/nh/tree/main/CHANGELOG.md
+[changelog]: https://github.com/nix-community/nh/tree/master/CHANGELOG.md
 
 - [ ] I have updated the [changelog] as per my changes
 - [ ] I have tested, and self-reviewed my code
