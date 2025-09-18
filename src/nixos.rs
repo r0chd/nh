@@ -208,10 +208,10 @@ impl OsRebuildArgs {
 
     debug!("Target specialisation: {target_specialisation:?}");
 
-    let target_profile = match &target_specialisation {
-      None => out_path.clone(),
-      Some(spec) => out_path.join("specialisation").join(spec),
-    };
+    let target_profile = target_specialisation.as_ref().map_or_else(
+      || out_path.clone(),
+      |spec| out_path.join("specialisation").join(spec),
+    );
 
     debug!("Output path: {out_path:?}");
     debug!("Target profile path: {}", target_profile.display());
@@ -290,31 +290,33 @@ impl OsRebuildArgs {
         .run()?;
     }
 
+    let switch_to_configuration = target_profile
+      .canonicalize()
+      .context("Failed to resolve output path")?
+      .join("bin")
+      .join("switch-to-configuration")
+      .canonicalize()
+      .context("Failed to resolve switch-to-configuration path")?;
+
+    if !switch_to_configuration.exists() {
+      return Err(eyre!(
+        "The 'switch-to-configuration' binary is missing from the built \
+         configuration.\n\nThis typically happens when 'system.switch.enable' \
+         is set to false in your\nNixOS configuration. To fix this, please \
+         either:\n1. Remove 'system.switch.enable = false' from your \
+         configuration, or\n2. Set 'system.switch.enable = true' \
+         explicitly\n\nIf the problem persists, please open an issue on our \
+         issue tracker!"
+      ));
+    }
+
+    let canonical_out_path =
+      switch_to_configuration.to_str().ok_or_else(|| {
+        eyre!("switch-to-configuration path contains invalid UTF-8")
+      })?;
+
     if let Test | Switch = variant {
-      let switch_to_configuration =
-        target_profile.join("bin").join("switch-to-configuration");
-
-      if !switch_to_configuration.exists() {
-        return Err(eyre!(
-          "The 'switch-to-configuration' binary is missing from the built \
-           configuration.\n\nThis typically happens when \
-           'system.switch.enable' is set to false in your\nNixOS \
-           configuration. To fix this, please either:\n1. Remove \
-           'system.switch.enable = false' from your configuration, or\n2. Set \
-           'system.switch.enable = true' explicitly\n\nIf the problem \
-           persists, please open an issue on our issue tracker!"
-        ));
-      }
-
-      let switch_to_configuration = switch_to_configuration
-        .canonicalize()
-        .context("Failed to resolve switch-to-configuration path")?;
-      let switch_to_configuration =
-        switch_to_configuration.to_str().ok_or_else(|| {
-          eyre!("switch-to-configuration path contains invalid UTF-8")
-        })?;
-
-      Command::new(switch_to_configuration)
+      Command::new(canonical_out_path)
         .arg("test")
         .ssh(self.target_host.clone())
         .message("Activating configuration")
@@ -326,51 +328,14 @@ impl OsRebuildArgs {
     }
 
     if let Boot | Switch = variant {
-      let canonical_out_path = out_path
-        .canonicalize()
-        .context("Failed to resolve output path")?;
-
       Command::new("nix")
-        .elevate(elevate.then_some(elevation.clone()))
+        .elevate(elevate.then_some(elevation))
         .args(["build", "--no-link", "--profile", SYSTEM_PROFILE])
-        .arg(&canonical_out_path)
-        .ssh(self.target_host.clone())
+        .arg(canonical_out_path)
+        .ssh(self.target_host)
         .with_required_env()
         .run()
         .wrap_err("Failed to set system profile")?;
-
-      let switch_to_configuration =
-        out_path.join("bin").join("switch-to-configuration");
-
-      if !switch_to_configuration.exists() {
-        return Err(eyre!(
-          "The 'switch-to-configuration' binary is missing from the built \
-           configuration.\n\nThis typically happens when \
-           'system.switch.enable' is set to false in your\nNixOS \
-           configuration. To fix this, please either:\n1. Remove \
-           'system.switch.enable = false' from your configuration, or\n2. Set \
-           'system.switch.enable = true' explicitly\n\nIf the problem \
-           persists, please open an issue on our issue tracker!"
-        ));
-      }
-
-      let switch_to_configuration = switch_to_configuration
-        .canonicalize()
-        .context("Failed to resolve switch-to-configuration path")?;
-      let switch_to_configuration =
-        switch_to_configuration.to_str().ok_or_else(|| {
-          eyre!("switch-to-configuration path contains invalid UTF-8")
-        })?;
-
-      Command::new(switch_to_configuration)
-        .arg("boot")
-        .ssh(self.target_host)
-        .elevate(elevate.then_some(elevation))
-        .message("Adding configuration to bootloader")
-        .preserve_envs(["NIXOS_INSTALL_BOOTLOADER"])
-        .with_required_env()
-        .run()
-        .wrap_err("Bootloader activation failed")?;
     }
 
     debug!("Completed operation with output path: {out_path:?}");
