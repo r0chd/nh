@@ -179,7 +179,9 @@ impl OsRebuildArgs {
     let toplevel = toplevel_for(
       &target_hostname,
       installable,
-      final_attr.unwrap_or(String::from("toplevel")).as_str(),
+      final_attr
+        .unwrap_or_else(|| String::from("toplevel"))
+        .as_str(),
     );
 
     let message = match variant {
@@ -345,6 +347,7 @@ impl OsRebuildArgs {
 }
 
 impl OsRollbackArgs {
+  #[expect(clippy::too_many_lines)]
   fn rollback(&self, elevation: ElevationStrategy) -> Result<()> {
     let elevate = if self.bypass_root_check {
       warn!("Bypassing root check, now running nix as root");
@@ -525,7 +528,7 @@ fn find_previous_generation() -> Result<generations::GenerationInfo> {
   let mut generations: Vec<generations::GenerationInfo> = fs::read_dir(
     profile_path
       .parent()
-      .unwrap_or(Path::new("/nix/var/nix/profiles")),
+      .unwrap_or_else(|| Path::new("/nix/var/nix/profiles")),
   )?
   .filter_map(|entry| {
     entry.ok().and_then(|e| {
@@ -573,7 +576,7 @@ fn find_generation_by_number(
   let generations: Vec<generations::GenerationInfo> = fs::read_dir(
     profile_path
       .parent()
-      .unwrap_or(Path::new("/nix/var/nix/profiles")),
+      .unwrap_or_else(|| Path::new("/nix/var/nix/profiles")),
   )?
   .filter_map(|entry| {
     entry.ok().and_then(|e| {
@@ -604,7 +607,7 @@ fn get_current_generation_number() -> Result<u64> {
   let generations: Vec<generations::GenerationInfo> = fs::read_dir(
     profile_path
       .parent()
-      .unwrap_or(Path::new("/nix/var/nix/profiles")),
+      .unwrap_or_else(|| Path::new("/nix/var/nix/profiles")),
   )?
   .filter_map(|entry| entry.ok().and_then(|e| generations::describe(&e.path())))
   .collect();
@@ -658,14 +661,11 @@ pub fn toplevel_for<S: AsRef<str>>(
     },
     Installable::File {
       ref mut attribute, ..
-    } => {
-      attribute.extend(toplevel);
-    },
-    Installable::Expression {
+    }
+    | Installable::Expression {
       ref mut attribute, ..
-    } => {
-      attribute.extend(toplevel);
-    },
+    } => attribute.extend(toplevel),
+
     Installable::Store { .. } => {},
   }
 
