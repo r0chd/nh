@@ -327,20 +327,38 @@ impl OsRebuildArgs {
         .with_required_env()
         .run()
         .wrap_err("Activation (test) failed")?;
+
+      debug!("Completed {variant:?} operation with output path: {out_path:?}");
     }
 
     if let Boot | Switch = variant {
       Command::new("nix")
-        .elevate(elevate.then_some(elevation))
+        .elevate(elevate.then_some(elevation.clone()))
         .args(["build", "--no-link", "--profile", SYSTEM_PROFILE])
         .arg(canonical_out_path)
-        .ssh(self.target_host)
+        .ssh(self.target_host.clone())
         .with_required_env()
         .run()
         .wrap_err("Failed to set system profile")?;
+
+      let mut cmd = Command::new(switch_to_configuration)
+        .arg("boot")
+        .ssh(self.target_host)
+        .elevate(elevate.then_some(elevation))
+        .message("Adding configuration to bootloader")
+        .preserve_envs(["NIXOS_INSTALL_BOOTLOADER"]);
+
+      if self.install_bootloader {
+        cmd = cmd.set_env("NIXOS_INSTALL_BOOTLOADER", "1");
+      }
+
+      cmd
+        .with_required_env()
+        .run()
+        .wrap_err("Bootloader activation failed")?;
     }
 
-    debug!("Completed operation with output path: {out_path:?}");
+    debug!("Completed {variant:?} operation with output path: {out_path:?}");
 
     Ok(())
   }
