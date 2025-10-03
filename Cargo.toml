@@ -9,7 +9,7 @@ version      = "4.2.0"
 
 [workspace.dependencies.clap]
 features = [ "cargo", "color", "derive", "env", "unstable-styles" ]
-version  = "4.5.41"
+version  = "4.5.48"
 
 [package]
 name                   = "nh"
@@ -26,34 +26,34 @@ rust-version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-anstyle = "1.0.11"
-chrono = "0.4.41"
+anstyle = "1.0.13"
+chrono = "0.4.42"
 clap.workspace = true
 clap-verbosity-flag = { version = "3.0.4", features = [ "tracing" ], default-features = false }
-clap_complete = "4.5.57"
+clap_complete = "4.5.58"
 color-eyre = { default-features = false, features = [ "track-caller" ], version = "0.6.5" }
 dix = "1.3.0"
 elasticsearch-dsl = "0.4.23"
 hostname = "0.4.1"
-humantime = "2.2.0"
-inquire = { default-features = false, version = "0.7.5", features = [ "crossterm" ] }
+humantime = "2.3.0"
+inquire = { default-features = false, version = "0.9.1", features = [ "crossterm" ] }
 nix = { default-features = false, features = [ "fs", "user" ], version = "0.30.1" }
-owo-colors = "4.2.2"
-regex = "1.11.2"
+owo-colors = "4.2.3"
+regex = "1.11.3"
 reqwest = { default-features = false, features = [
   "rustls-tls-native-roots",
   "blocking",
   "json",
 ], version = "0.12.23" }
 secrecy = { version = "0.10.3", features = [ "serde" ] }
-semver = "1.0.26"
-serde = { features = [ "derive" ], version = "1.0.219" }
-serde_json = "1.0.143"
+semver = "1.0.27"
+serde = { features = [ "derive" ], version = "1.0.228" }
+serde_json = "1.0.145"
 subprocess = "0.2.9"
 supports-hyperlinks = "3.1.0"
-tempfile = "3.21.0"
+tempfile = "3.23.0"
 textwrap = { features = [ "terminal_size" ], version = "0.16.2" }
-thiserror = "2.0.16"
+thiserror = "2.0.17"
 tracing = "0.1.41"
 tracing-subscriber = { features = [ "env-filter", "registry", "std" ], version = "0.3.20" }
 which = "8.0.0"
@@ -62,8 +62,8 @@ which = "8.0.0"
 system-configuration = "0.6.1"
 
 [dev-dependencies]
-clap_mangen = "0.2.28"
-proptest    = "1.7.0"
+clap_mangen = "0.2.29"
+proptest    = "1.8.0"
 serial_test = "3.2.0"
 
 [profile.release]
