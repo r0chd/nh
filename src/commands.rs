@@ -458,6 +458,52 @@ impl Command {
     Ok(cmd)
   }
 
+  fn build_sudo_parts(&self) -> Result<Vec<String>> {
+    let elevation_program = self
+      .elevate
+      .as_ref()
+      .ok_or_else(|| eyre::eyre!("Command not found for elevation"))?
+      .resolve()
+      .context("Failed to resolve elevation program")?;
+
+    let mut parts = vec![elevation_program.to_string_lossy().to_string()];
+
+    let program_name = elevation_program
+      .file_name()
+      .and_then(|name| name.to_str())
+      .ok_or_else(|| {
+        eyre::eyre!("Failed to determine elevation program name")
+      })?;
+    if program_name == "sudo" {
+      if let Ok(_askpass) = std::env::var("NH_SUDO_ASKPASS") {
+        parts.push("-A".to_string());
+      }
+    }
+
+    let preserve_env = std::env::var("NH_PRESERVE_ENV")
+      .as_deref()
+      .map(|x| !matches!(x, "0"))
+      .unwrap_or(true);
+
+    parts.push("env".to_string());
+    for env_arg in self.env_vars.iter().filter_map(|(key, action)| {
+      match action {
+        EnvAction::Set(value) => Some(format!("{key}={value}")),
+        EnvAction::Preserve if preserve_env => {
+          match std::env::var(key) {
+            Ok(value) => Some(format!("{key}={value}")),
+            Err(_) => None,
+          }
+        },
+        _ => None,
+      }
+    }) {
+      parts.push(env_arg);
+    }
+
+    Ok(parts)
+  }
+
   /// Create a sudo command for self-elevation with proper environment handling
   ///
   /// # Errors
@@ -476,24 +522,23 @@ impl Command {
       .elevate(Some(strategy))
       .with_required_env();
 
-    let sudo_exec = cmd_builder.build_sudo_cmd()?;
+    let mut sudo_parts = cmd_builder.build_sudo_parts()?;
 
-    // Add the target executable and arguments to the sudo command
-    let exec_with_args = sudo_exec.arg(&current_exe);
+    // Add the target executable and arguments
+    sudo_parts.push(current_exe.to_string_lossy().to_string());
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let final_exec = exec_with_args.args(&args);
+    sudo_parts.extend(args);
 
-    // Convert Exec to std::process::Command by parsing the command line
-    let cmdline = final_exec.to_cmdline_lossy();
-    let parts = parse_cmdline_with_quotes(&cmdline);
-
-    if parts.is_empty() {
-      bail!("Failed to build sudo command");
+    let mut std_cmd = std::process::Command::new(&sudo_parts[0]);
+    if sudo_parts.len() > 1 {
+      std_cmd.args(&sudo_parts[1..]);
     }
 
-    let mut std_cmd = std::process::Command::new(&parts[0]);
-    if parts.len() > 1 {
-      std_cmd.args(&parts[1..]);
+    if let Some(ElevationStrategy::Force("sudo")) = cmd_builder.elevate.as_ref()
+    {
+      if let Ok(askpass) = std::env::var("NH_SUDO_ASKPASS") {
+        std_cmd.env("SUDO_ASKPASS", askpass);
+      }
     }
 
     Ok(std_cmd)
