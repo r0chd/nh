@@ -108,24 +108,61 @@ pub fn get_closure_size(generation_dir: &Path) -> Option<String> {
     .output()
   {
     Ok(output) => {
-      match serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(
-        &output.stdout,
-      )) {
+      let output_str = String::from_utf8_lossy(&output.stdout);
+      match serde_json::from_str::<serde_json::Value>(&output_str) {
         #[allow(clippy::cast_precision_loss)]
         Ok(json) => {
-          Some(
-            json[store_path.to_string_lossy().to_string()]["closureSize"]
-              .as_u64()
-              .map_or_else(
-                || "Unknown".to_string(),
-                |bytes| format!("{:.1} GB", bytes as f64 / 1_073_741_824.0),
-              ),
-          )
+          // `nix path-info --json` returns an array, we need to handle it
+          let store_path_str = store_path.to_string_lossy();
+          let closure_size = json.as_array().and_then(|arr| {
+            arr.iter().find_map(|entry| {
+              let path = entry.get("path").and_then(|v| v.as_str());
+              let size = entry.get("closureSize").and_then(serde_json::Value::as_u64);
+              if let (Some(path), Some(size)) = (path, size) {
+                if path == store_path_str {
+                  return Some(size);
+                }
+              }
+              None
+            })
+          });
+          if closure_size.is_none() {
+            let paths: Vec<String> = json
+              .as_array()
+              .map(|arr| {
+                arr
+                  .iter()
+                  .filter_map(|entry| {
+                    entry
+                      .get("path")
+                      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+                  })
+                  .collect()
+              })
+              .unwrap_or_default();
+            debug!(
+              "get_closure_size: store_path not found or closureSize missing. \
+               store_path: {store_path_str}, json paths: {:?}, output: {}",
+              paths, output_str
+            );
+          }
+          Some(closure_size.map_or_else(
+            || "Unknown".to_string(),
+            |bytes| format!("{:.1} GB", bytes as f64 / 1_073_741_824.0),
+          ))
         },
-        Err(_) => Some("Unknown".to_string()),
+        Err(e) => {
+          debug!(
+            "get_closure_size: failed to parse JSON: {e} output: {output_str}"
+          );
+          Some("Unknown".to_string())
+        },
       }
     },
-    Err(_) => Some("Unknown".to_string()),
+    Err(e) => {
+      debug!("get_closure_size: failed to run nix path-info: {e:?}");
+      Some("Unknown".to_string())
+    },
   }
 }
 
@@ -339,11 +376,11 @@ pub fn print_info(
     .iter()
     .map(|f| {
       let (name, width) = f.column_info(widths);
-      format!("{:<width$}", name)
+      format!("{name:<width$}")
     })
     .collect::<Vec<String>>()
     .join(" ");
-  println!("{}", header);
+  println!("{header}");
 
   // Print generations in descending order
   for generation in generations.iter().rev() {
@@ -382,11 +419,11 @@ pub fn print_info(
           Field::Spec => specialisations.clone(),
           Field::Size => generation.closure_size.clone(),
         };
-        format!("{:width$}", cell_content)
+        format!("{cell_content:width$}")
       })
       .collect::<Vec<String>>()
       .join(" ");
-    println!("{}", row);
+    println!("{row}");
   }
 
   Ok(())
