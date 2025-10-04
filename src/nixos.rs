@@ -595,18 +595,31 @@ fn find_vm_script(out_path: &Path) -> Result<PathBuf> {
     format!("Failed to read bin directory at {}", bin_dir.display())
   })?;
 
-  let vm_script = entries
-    .filter_map(std::result::Result::ok)
-    .find(|entry| {
-      entry
-        .file_name()
-        .to_str()
-        .is_some_and(|name| name.starts_with("run-") && name.ends_with("-vm"))
-    })
-    .map(|entry| entry.path())
-    .ok_or_else(|| {
-      eyre!("Could not find VM runner script in {}", bin_dir.display())
-    })?;
+  let mut vm_script: Option<PathBuf> = None;
+  for entry_result in entries {
+    match entry_result {
+      Ok(entry) => {
+        let fname = entry.file_name();
+        if fname
+          .to_str()
+          .is_some_and(|name| name.starts_with("run-") && name.ends_with("-vm"))
+        {
+          vm_script = Some(entry.path());
+          break;
+        }
+      },
+      Err(e) => {
+        warn!(
+          "Error reading entry in VM bin directory ({}): {}",
+          bin_dir.display(),
+          e
+        );
+      },
+    }
+  }
+  let vm_script = vm_script.ok_or_else(|| {
+    eyre!("Could not find VM runner script in {}", bin_dir.display())
+  })?;
 
   Ok(vm_script)
 }
