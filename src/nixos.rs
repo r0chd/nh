@@ -563,6 +563,24 @@ impl OsRollbackArgs {
   }
 }
 
+/// Finds the VM runner script in the given build output directory.
+///
+/// Searches for a file matching `run-*-vm` in the `bin` subdirectory of
+/// `out_path`.
+///
+/// # Arguments
+///
+/// * `out_path` - The path to the build output directory (usually `result`).
+///
+/// # Returns
+///
+/// * `Ok(PathBuf)` with the path to the VM runner script if found.
+/// * `Err` if the script cannot be found or the bin directory is missing.
+///
+/// # Errors
+///
+/// Returns an error if the bin directory does not exist or if no matching
+/// script is found.
 fn find_vm_script(out_path: &Path) -> Result<PathBuf> {
   let bin_dir = out_path.join("bin");
 
@@ -593,6 +611,20 @@ fn find_vm_script(out_path: &Path) -> Result<PathBuf> {
   Ok(vm_script)
 }
 
+/// Prints instructions for running the built VM to the user.
+///
+/// Attempts to locate the VM runner script in the build output directory and
+/// prints a message with the path to the script. If the script cannot be found,
+/// prints a warning and a generic path pattern.
+///
+/// # Arguments
+///
+/// * `out_path` - The path to the build output directory (usually `result`).
+///
+/// # Returns
+///
+/// * `Ok(())` on success.
+/// * `Err` if there is an error searching for the VM script.
 fn print_vm_instructions(out_path: &Path) -> Result<()> {
   match find_vm_script(out_path) {
     Ok(script) => {
@@ -613,6 +645,20 @@ fn print_vm_instructions(out_path: &Path) -> Result<()> {
   Ok(())
 }
 
+/// Runs the built NixOS VM by executing the VM runner script.
+///
+/// Locates the VM runner script in the build output directory and executes it,
+/// streaming its output to the user. Returns an error if the script cannot be
+/// found or if execution fails.
+///
+/// # Arguments
+///
+/// * `out_path` - The path to the build output directory (usually `result`).
+///
+/// # Returns
+///
+/// * `Ok(())` if the VM was started successfully.
+/// * `Err` if the script cannot be found or execution fails.
 fn run_vm(out_path: &Path) -> Result<()> {
   let vm_script = find_vm_script(out_path)?;
 
