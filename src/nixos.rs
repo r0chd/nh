@@ -64,10 +64,27 @@ enum OsRebuildVariant {
 impl OsBuildVmArgs {
   fn build_vm(self, elevation: ElevationStrategy) -> Result<()> {
     let final_attr = get_final_attr(true, self.with_bootloader);
-    debug!("Building VM with attribute: {}", final_attr);
-    self
+    let should_run = self.run;
+    let out_path = self
       .common
-      .rebuild(&OsRebuildVariant::BuildVm, Some(final_attr), elevation)
+      .common
+      .out_link
+      .clone()
+      .unwrap_or_else(|| PathBuf::from("result"));
+
+    debug!("Building VM with attribute: {}", final_attr);
+    self.common.rebuild(
+      &OsRebuildVariant::BuildVm,
+      Some(final_attr),
+      elevation,
+    )?;
+
+    // If --run flag is set, execute the VM
+    if should_run {
+      run_vm(&out_path)?;
+    }
+
+    Ok(())
   }
 }
 
@@ -261,6 +278,12 @@ impl OsRebuildArgs {
       if self.common.ask {
         warn!("--ask has no effect as dry run was requested");
       }
+
+      // For VM builds, print instructions on how to run the VM
+      if matches!(variant, BuildVm) && !self.common.dry {
+        print_vm_instructions(&out_path)?;
+      }
+
       return Ok(());
     }
 
@@ -538,6 +561,76 @@ impl OsRollbackArgs {
 
     Ok(())
   }
+}
+
+fn find_vm_script(out_path: &Path) -> Result<PathBuf> {
+  let bin_dir = out_path.join("bin");
+
+  if !bin_dir.exists() {
+    bail!(
+      "VM build output missing bin directory at {}",
+      bin_dir.display()
+    );
+  }
+
+  let entries = fs::read_dir(&bin_dir).wrap_err_with(|| {
+    format!("Failed to read bin directory at {}", bin_dir.display())
+  })?;
+
+  let vm_script = entries
+    .filter_map(std::result::Result::ok)
+    .find(|entry| {
+      entry
+        .file_name()
+        .to_str()
+        .is_some_and(|name| name.starts_with("run-") && name.ends_with("-vm"))
+    })
+    .map(|entry| entry.path())
+    .ok_or_else(|| {
+      eyre!("Could not find VM runner script in {}", bin_dir.display())
+    })?;
+
+  Ok(vm_script)
+}
+
+fn print_vm_instructions(out_path: &Path) -> Result<()> {
+  match find_vm_script(out_path) {
+    Ok(script) => {
+      info!(
+        "Done. The virtual machine can be started by running {}",
+        script.display()
+      );
+    },
+    Err(e) => {
+      warn!("VM build completed, but could not find run script: {}", e);
+      info!(
+        "Done. The virtual machine script should be at {}/bin/run-*-vm",
+        out_path.display()
+      );
+    },
+  }
+
+  Ok(())
+}
+
+fn run_vm(out_path: &Path) -> Result<()> {
+  let vm_script = find_vm_script(out_path)?;
+
+  info!(
+    "Running VM... Starting virtual machine with {}",
+    vm_script.display()
+  );
+
+  Command::new(&vm_script)
+    .message("Running VM")
+    .show_output(true)
+    .with_required_env()
+    .run()
+    .wrap_err_with(|| {
+      format!("Failed to run VM script at {}", vm_script.display())
+    })?;
+
+  Ok(())
 }
 
 fn find_previous_generation() -> Result<generations::GenerationInfo> {
