@@ -29,6 +29,10 @@ functionality, under the "Removed" section.
   explicit through the `--install-bootloader` flag.
   ([#424](https://github.com/nix-community/nh/issues/424))
 
+- A `--run` flag was added to `nh os build-vm`, which allows immediately
+  starting a built VM after the build is complete. This can be chained with
+  other `build-vm` flags such as `--with-bootloader`.
+
 ## 4.2.0
 
 ### Changed
