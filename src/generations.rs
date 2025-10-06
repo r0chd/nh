@@ -96,7 +96,7 @@ pub fn from_dir(generation_dir: &Path) -> Option<u64> {
 }
 
 #[must_use]
-pub fn get_closure_size(generation_dir: &Path) -> std::string::String {
+pub fn get_closure_size(generation_dir: &Path) -> String {
   let store_path = generation_dir
     .read_link()
     .unwrap_or_else(|_| generation_dir.to_path_buf());
