@@ -35,6 +35,8 @@ functionality, under the "Removed" section.
 - Switched from owo-colors to Yansi as the internal coloring library. This
   should not affect end-users, but please create an issue if you notice anything
   different.
+- `nh os info` now hides empty fields by default, they can be explicitly shown
+  via the `--fields` flag.
 
 ## 4.2.0
 
