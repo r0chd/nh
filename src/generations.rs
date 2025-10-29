@@ -313,7 +313,7 @@ pub fn describe(generation_dir: &Path) -> Option<GenerationInfo> {
 #[expect(clippy::too_many_lines)]
 pub fn print_info(
   mut generations: Vec<GenerationInfo>,
-  fields: &[Field],
+  fields: Option<&[Field]>,
 ) -> Result<()> {
   // Parse all dates at once and cache them
   let mut parsed_dates = HashMap::with_capacity(generations.len());
@@ -348,16 +348,24 @@ pub fn print_info(
     .any(|g| g.configuration_revision.is_some());
   let has_spec = generations.iter().any(|g| g.specialisations.is_some());
 
-  let visible_fields: Vec<&Field> = fields
-    .iter()
-    .filter(|f| {
-      match f {
-        Field::Confrev => has_confrev,
-        Field::Spec => has_spec,
-        _ => true,
-      }
-    })
-    .collect();
+  let visible_fields: Vec<Field> = fields.map_or_else(
+    || {
+      use Field::{Confrev, Date, Id, Kernel, Nver, Size, Spec};
+      let all_fields = [Id, Date, Nver, Kernel, Confrev, Spec, Size];
+
+      all_fields
+        .into_iter()
+        .filter(|f| {
+          match f {
+            Confrev => has_confrev,
+            Spec => has_spec,
+            _ => true,
+          }
+        })
+        .collect()
+    },
+    <[Field]>::to_vec,
+  );
 
   // Determine column widths for pretty printing
   let max_nixos_version_len = generations
