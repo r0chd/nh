@@ -100,71 +100,65 @@ pub fn get_closure_size(generation_dir: &Path) -> String {
   let store_path = generation_dir
     .read_link()
     .unwrap_or_else(|_| generation_dir.to_path_buf());
-  match process::Command::new("nix")
-    .arg("path-info")
+  let store_path_str = store_path.to_string_lossy();
+
+  let output = match process::Command::new("nix")
+    .args(["path-info", "-Sh", "--json"])
     .arg(generation_dir)
-    .arg("-Sh")
-    .arg("--json")
     .output()
   {
-    Ok(output) => {
-      let output_str = String::from_utf8_lossy(&output.stdout);
-      match serde_json::from_str::<serde_json::Value>(&output_str) {
-        #[allow(clippy::cast_precision_loss)]
-        Ok(json) => {
-          // `nix path-info --json` returns an array, we need to handle it
-          let store_path_str = store_path.to_string_lossy();
-          let closure_size = json.as_array().and_then(|arr| {
-            arr.iter().find_map(|entry| {
-              let path = entry.get("path").and_then(|v| v.as_str());
-              let size =
-                entry.get("closureSize").and_then(serde_json::Value::as_u64);
-              if let (Some(path), Some(size)) = (path, size) {
-                if path == store_path_str {
-                  return Some(size);
-                }
-              }
-              None
-            })
-          });
-          if closure_size.is_none() {
-            let paths: Vec<String> = json
-              .as_array()
-              .map(|arr| {
-                arr
-                  .iter()
-                  .filter_map(|entry| {
-                    entry.get("path").and_then(|v| {
-                      v.as_str().map(std::string::ToString::to_string)
-                    })
-                  })
-                  .collect()
-              })
-              .unwrap_or_default();
-            debug!(
-              "get_closure_size: store_path not found or closureSize missing. \
-               store_path: {store_path_str}, json paths: {:?}, output: {}",
-              paths, output_str
-            );
-          }
-          closure_size.map_or_else(
-            || "Unknown".to_string(),
-            |bytes| format!("{:.1} GB", bytes as f64 / 1_073_741_824.0),
-          )
-        },
-        Err(e) => {
-          debug!(
-            "get_closure_size: failed to parse JSON: {e} output: {output_str}"
-          );
-          "Unknown".to_string()
-        },
-      }
-    },
+    Ok(out) => out,
+
     Err(e) => {
       debug!("get_closure_size: failed to run nix path-info: {e:?}");
+      return "Unknown".to_string();
+    },
+  };
+
+  let output_str = String::from_utf8_lossy(&output.stdout);
+
+  let json: serde_json::Value =
+    match serde_json::from_str::<serde_json::Value>(&output_str) {
+      Ok(j) => j,
+
+      Err(e) => {
+        debug!(
+          "get_closure_size: failed to parse JSON: {e} output: {output_str}"
+        );
+        return "Unknown".to_string();
+      },
+    };
+
+  let closure_size = json.as_array().and_then(|arr| {
+    arr.iter().find_map(|entry| {
+      let path = entry.get("path")?.as_str()?;
+      let size = entry.get("closureSize")?.as_u64()?;
+      (path == store_path_str).then_some(size)
+    })
+  });
+
+  closure_size.map_or_else(
+    || {
+      let paths: Vec<String> = json
+        .as_array()
+        .map(|arr| {
+          arr
+            .iter()
+            .filter_map(|e| e.get("path")?.as_str().map(ToString::to_string))
+            .collect()
+        })
+        .unwrap_or_default();
+
+      debug!(
+        "get_closure_size: store_path not found or closureSize missing. \
+         store_path: {store_path_str}, json paths: {:?}, output: {}",
+        paths, output_str
+      );
       "Unknown".to_string()
     },
-  }
+    #[expect(clippy::cast_precision_loss)]
+    |bytes| format!("{:.1} GB", bytes as f64 / 1_073_741_824.0),
+  )
 }
 
 pub fn describe(generation_dir: &Path) -> Option<GenerationInfo> {
