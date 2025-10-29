@@ -945,7 +945,7 @@ impl OsGenerationsArgs {
       .filter_map(|gen_dir| generations::describe(gen_dir))
       .collect();
 
-    generations::print_info(descriptions, &self.fields)?;
+    generations::print_info(descriptions, self.fields.as_deref())?;
 
     Ok(())
   }
