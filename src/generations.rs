@@ -129,25 +129,37 @@ pub fn get_closure_size(generation_dir: &Path) -> String {
       },
     };
 
-  let closure_size = json.as_array().and_then(|arr| {
+  let closure_size = if let Some(arr) = json.as_array() {
+    // Handle array format (mainline Nix and Determinate Nix)
     arr.iter().find_map(|entry| {
       let path = entry.get("path")?.as_str()?;
       let size = entry.get("closureSize")?.as_u64()?;
       (path == store_path_str).then_some(size)
     })
-  });
+  } else if let Some(obj) = json.as_object() {
+    // Handle object format (Lix) - store paths are keys
+    obj
+      .iter()
+      .find(|(path, _)| path.as_str() == store_path_str)
+      .and_then(|(_, value)| value.get("closureSize"))
+      .and_then(serde_json::Value::as_u64)
+  } else {
+    None
+  };
 
   closure_size.map_or_else(
     || {
-      let paths: Vec<String> = json
-        .as_array()
-        .map(|arr| {
-          arr
-            .iter()
-            .filter_map(|e| e.get("path")?.as_str().map(ToString::to_string))
-            .collect()
-        })
-        .unwrap_or_default();
+      let paths: Vec<String> = if let Some(arr) = json.as_array() {
+        arr
+          .iter()
+          .filter_map(|e| e.get("path")?.as_str().map(ToString::to_string))
+          .collect()
+      } else if let Some(obj) = json.as_object() {
+        // For Lix object format, the keys are the store paths
+        obj.keys().cloned().collect()
+      } else {
+        Vec::new()
+      };
 
       debug!(
         "get_closure_size: store_path not found or closureSize missing. \
