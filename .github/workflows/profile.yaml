@@ -25,19 +25,31 @@ jobs:
 
       - id: head_timing_metrics
         run: |
+          set -euo pipefail
           # Extract timing metrics from head branch
           {
             echo 'metrics<<EOF'
-            cargo run --features='hotpath,hotpath-ci' -- search "nix" | grep '^{"hotpath_profiling_mode"'
+            if ! output=$(cargo run --features='hotpath' -- search "nix" 2>&1 | grep '^{"hotpath_profiling_mode"' || [[ -z "$output" ]]; then
+              echo "Error: Failed to extract timing metrics from head branch"
+              echo "Cargo command failed or produced no matching output"
+              exit 1
+            fi
+            echo "$output"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
       - id: head_alloc_metrics
         run: |
+          set -euo pipefail
           # Extract alloc metrics from head branch
           {
             echo 'metrics<<EOF'
-            cargo run --features='hotpath,hotpath-ci,hotpath-alloc-count-total' -- search "nix" | grep '^{"hotpath_profiling_mode"'
+            if ! output=$(cargo run --features='hotpath,hotpath-alloc-count-total' -- search "nix" 2>&1 | grep '^{"hotpath_profiling_mode"' || [[ -z "$output" ]]; then
+              echo "Error: Failed to extract alloc metrics from head branch"
+              echo "Cargo command failed or produced no matching output"
+              exit 1
+            fi
+            echo "$output"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -47,19 +59,31 @@ jobs:
 
       - id: base_timing_metrics
         run: |
+          set -euo pipefail
           # Extract timing metrics from base branch
           {
             echo 'metrics<<EOF'
-            cargo run --features='hotpath,hotpath-ci' -- search "nix" | grep '^{"hotpath_profiling_mode"'
+            if ! output=$(cargo run --features='hotpath' -- search "nix" 2>&1 | grep '^{"hotpath_profiling_mode"' || [[ -z "$output" ]]; then
+              echo "Error: Failed to extract timing metrics from base branch"
+              echo "Cargo command failed or produced no matching output"
+              exit 1
+            fi
+            echo "$output"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
       - id: base_alloc_metrics
         run: |
+          set -euo pipefail
           # Extract alloc metrics from base branch
           {
             echo 'metrics<<EOF'
-            cargo run --features='hotpath,hotpath-ci,hotpath-alloc-count-total' -- search "nix" | grep '^{"hotpath_profiling_mode"'
+            if ! output=$(cargo run --features='hotpath,hotpath-alloc-count-total' -- search "nix" 2>&1 | grep '^{"hotpath_profiling_mode"' || [[ -z "$output" ]]; then
+              echo "Error: Failed to extract alloc metrics from base branch"
+              echo "Cargo command failed or produced no matching output"
+              exit 1
+            fi
+            echo "$output"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
