@@ -64,9 +64,15 @@ impl FromArgMatches for Installable {
 
     if let Some(i) = installable {
       let mut elems = i.splitn(2, '#');
-      let reference = elems.next().ok_or_else(|| {
-        clap::Error::raw(ErrorKind::ValueValidation, "Invalid installable format: missing reference")
-      })?.to_owned();
+      let reference = elems
+        .next()
+        .ok_or_else(|| {
+          clap::Error::raw(
+            ErrorKind::ValueValidation,
+            "Invalid installable format: missing reference",
+          )
+        })?
+        .to_owned();
       return Ok(Self::Flake {
         reference,
         attribute: parse_attribute(

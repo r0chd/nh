@@ -508,7 +508,9 @@ impl Command {
     // able to read from stdin, but needs to be tested and possibly
     // mitigated.
     let sudo_password = if self.ssh.is_some() && self.elevate.is_some() {
-      let host = self.ssh.as_ref().ok_or_else(|| eyre::eyre!("SSH host is None but elevation is required"))?;
+      let host = self.ssh.as_ref().ok_or_else(|| {
+        eyre::eyre!("SSH host is None but elevation is required")
+      })?;
       if let Some(cached_password) = get_cached_password(host) {
         Some(cached_password)
       } else {
@@ -533,7 +535,9 @@ impl Command {
       let elevation_program = self
         .elevate
         .as_ref()
-        .ok_or_else(|| eyre::eyre!("Elevation program is None but elevation is required"))?
+        .ok_or_else(|| {
+          eyre::eyre!("Elevation program is None but elevation is required")
+        })?
         .resolve()
         .context("Failed to resolve elevation program")?;
 
@@ -1024,7 +1028,9 @@ mod tests {
   fn test_build_sudo_cmd_basic() {
     let cmd =
       Command::new("test").elevate(Some(ElevationStrategy::Force("sudo")));
-    let sudo_exec = cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed in test");
+    let sudo_exec = cmd
+      .build_sudo_cmd()
+      .expect("build_sudo_cmd should succeed in test");
 
     // Platform-agnostic: 'sudo' may not be the first token if env vars are
     // injected (e.g., NH_SUDO_ASKPASS). Accept any command line where
@@ -1044,7 +1050,9 @@ mod tests {
       .preserve_envs(["VAR1", "VAR2"])
       .elevate(Some(ElevationStrategy::Force("sudo")));
 
-    let sudo_exec = cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed in test");
+    let sudo_exec = cmd
+      .build_sudo_cmd()
+      .expect("build_sudo_cmd should succeed in test");
     let cmdline = sudo_exec.to_cmdline_lossy();
 
     assert!(cmdline.contains("env"));
@@ -1063,7 +1071,9 @@ mod tests {
       .preserve_envs(["VAR1", "VAR2"])
       .elevate(Some(ElevationStrategy::Force("sudo")));
 
-    let sudo_exec = cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed in test");
+    let sudo_exec = cmd
+      .build_sudo_cmd()
+      .expect("build_sudo_cmd should succeed in test");
     let cmdline = sudo_exec.to_cmdline_lossy();
 
     assert!(cmdline.contains("env"));
@@ -1081,7 +1091,9 @@ mod tests {
       EnvAction::Set("test_value".to_string()),
     );
 
-    let sudo_exec = cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed in test");
+    let sudo_exec = cmd
+      .build_sudo_cmd()
+      .expect("build_sudo_cmd should succeed in test");
     let cmdline = sudo_exec.to_cmdline_lossy();
 
     // Should contain env command with variable
@@ -1104,7 +1116,9 @@ mod tests {
       .env_vars
       .insert("VAR_TO_REMOVE".to_string(), EnvAction::Remove);
 
-    let sudo_exec = cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed in test");
+    let sudo_exec = cmd
+      .build_sudo_cmd()
+      .expect("build_sudo_cmd should succeed in test");
     let cmdline = sudo_exec.to_cmdline_lossy();
 
     assert!(cmdline.contains("env"));
@@ -1119,7 +1133,9 @@ mod tests {
 
     let cmd =
       Command::new("test").elevate(Some(ElevationStrategy::Force("sudo")));
-    let sudo_exec = cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed in test");
+    let sudo_exec = cmd
+      .build_sudo_cmd()
+      .expect("build_sudo_cmd should succeed in test");
     let cmdline = sudo_exec.to_cmdline_lossy();
 
     // Should contain -A flag for askpass
@@ -1145,7 +1161,9 @@ mod tests {
       .env_vars
       .insert("PRESERVE_VAR".to_string(), EnvAction::Preserve);
 
-    let sudo_exec = cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed in test");
+    let sudo_exec = cmd
+      .build_sudo_cmd()
+      .expect("build_sudo_cmd should succeed in test");
     let cmdline = sudo_exec.to_cmdline_lossy();
 
     // Count occurrences of "env" in the command line

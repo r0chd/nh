@@ -581,7 +581,10 @@ mod tests {
       result.is_ok(),
       "Should warn when migrating FLAKE to NH_FLAKE"
     );
-    assert_eq!(env::var("NH_FLAKE").expect("NH_FLAKE should be set by test"), "/test/flake");
+    assert_eq!(
+      env::var("NH_FLAKE").expect("NH_FLAKE should be set by test"),
+      "/test/flake"
+    );
   }
 
   #[test]
@@ -604,7 +607,10 @@ mod tests {
       result.is_ok(),
       "Should not warn when NH_FLAKE already exists"
     );
-    assert_eq!(env::var("NH_FLAKE").expect("NH_FLAKE should be set by test"), "/existing/flake");
+    assert_eq!(
+      env::var("NH_FLAKE").expect("NH_FLAKE should be set by test"),
+      "/existing/flake"
+    );
   }
 
   #[test]
@@ -627,7 +633,10 @@ mod tests {
       result.is_ok(),
       "Should not warn when specific flake vars exist"
     );
-    assert_eq!(env::var("NH_FLAKE").expect("NH_FLAKE should be set by test"), "/test/flake");
+    assert_eq!(
+      env::var("NH_FLAKE").expect("NH_FLAKE should be set by test"),
+      "/test/flake"
+    );
   }
 
   #[test]
