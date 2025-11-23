@@ -37,13 +37,15 @@ functionality, under the "Removed" section.
 - `nh os info` now hides empty fields by default, they can be explicitly shown
   via the `--fields` flag.
 - `nh completions` now supports [nushell](https://www.nushell.sh/)
-- `nh os switch` now accepts a `--show-systemctl-hints` flag that displays
-  failing systemd units at the end of the rebuild log. This flag can be used to
-  replicate the activation behaviour from `nixos-rebuild` where failing units
-  are displayed at the end.
-  - NH also allows making this the global default by setting
-    `NH_SHOW_SYSTEMCTL_HINTS`. This is useful if you miss the behaviour from
-    `nixos-rebuild` where this is default without a way of suppressing those.
+- Platform commands (`nh os`, `nh home`, `nh darwin`) now accept a
+  `--show-activation-logs` flag that displays activation output at the end.
+  While activation output is now hidden to reduce noise _by default_, this flag
+  can be used to replicate the activation behaviour from `nixos-rebuild` where
+  failing units are displayed at the end.
+  - **Breaking change**: Activation output is now hidden by default on Home
+    Manager and Darwin. The logs were previously always visible.
+  - The flag can be set globally via the `NH_SHOW_ACTIVATION_LOGS` environment
+    variable.
 
 ### Fixed
 

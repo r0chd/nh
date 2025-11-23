@@ -177,6 +177,7 @@ impl HomeRebuildArgs {
     Command::new(target_profile.join("activate"))
       .with_required_env()
       .message("Activating configuration")
+      .show_output(self.show_activation_logs)
       .run()
       .wrap_err("Activation failed")?;
 
