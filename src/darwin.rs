@@ -184,7 +184,7 @@ impl DarwinRebuildArgs {
         .message("Activating configuration")
         .elevate(needs_elevation.then_some(elevation))
         .dry(self.common.dry)
-        .show_output(true)
+        .show_output(self.show_activation_logs)
         .with_required_env()
         .run()
         .wrap_err("Darwin activation failed")?;

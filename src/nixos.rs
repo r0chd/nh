@@ -234,28 +234,9 @@ impl OsRebuildActivateArgs {
         .elevate(elevate.then_some(elevation.clone()))
         .preserve_envs(["NIXOS_INSTALL_BOOTLOADER"])
         .with_required_env()
-        .show_output(self.show_systemctl_hints)
+        .show_output(self.show_activation_logs)
         .run()
-        .map_err(|e| {
-          // Check if this looks like a service/unit failure
-          let error_display = format!("{e:#}");
-          let error_lower = error_display.to_lowercase();
-
-          let is_service_failure = error_lower.contains("units failed")
-            || (error_lower.contains("failed")
-              && error_lower.contains("service"))
-            || (error_lower.contains("failed") && error_lower.contains("unit"));
-
-          if is_service_failure && self.show_systemctl_hints {
-            e.wrap_err(format!(
-              "Activation ({variant_label}) failed\n\nTo investigate failed \
-               services:\n  systemctl --failed\n  journalctl -xe -u \
-               <service-name>"
-            ))
-          } else {
-            e.wrap_err(format!("Activation ({variant_label}) failed"))
-          }
-        })?;
+        .wrap_err(format!("Activation ({variant_label}) failed"))?;
 
       debug!("Completed {variant:?} operation with output path: {out_path:?}");
     }

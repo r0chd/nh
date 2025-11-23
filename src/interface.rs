@@ -246,9 +246,9 @@ pub struct OsRebuildActivateArgs {
   #[command(flatten)]
   pub rebuild: OsRebuildArgs,
 
-  /// Show systemctl debugging hints when systemd services fail
-  #[arg(long, env = "NH_SHOW_SYSTEMCTL_HINTS")]
-  pub show_systemctl_hints: bool,
+  /// Show activation logs
+  #[arg(long, env = "NH_SHOW_ACTIVATION_LOGS")]
+  pub show_activation_logs: bool,
 }
 
 impl OsRebuildArgs {
@@ -539,6 +539,10 @@ pub struct HomeRebuildArgs {
   /// Move existing files by backing up with this file extension
   #[arg(long, short = 'b')]
   pub backup_extension: Option<String>,
+
+  /// Show activation logs
+  #[arg(long, env = "NH_SHOW_ACTIVATION_LOGS")]
+  pub show_activation_logs: bool,
 }
 
 impl HomeRebuildArgs {
@@ -641,6 +645,10 @@ pub struct DarwinRebuildArgs {
   /// Don't panic if calling nh as root
   #[arg(short = 'R', long, env = "NH_BYPASS_ROOT_CHECK")]
   pub bypass_root_check: bool,
+
+  /// Show activation logs
+  #[arg(long, env = "NH_SHOW_ACTIVATION_LOGS")]
+  pub show_activation_logs: bool,
 }
 
 impl DarwinRebuildArgs {
