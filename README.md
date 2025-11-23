@@ -38,7 +38,7 @@ to acting as a super-convenient, all-in-one utility that reimplements well-known
 and commonly used Nix commands, NH is a _pretty_ tool that brings together
 relevant 3rd party projects that you might be familiar with.
 
-To get started with NH, skip to the [Usage] section.
+To get started with NH, skip to the [Usage](#usage) section.
 
 ## Features
 
