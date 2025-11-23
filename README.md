@@ -81,7 +81,7 @@ experience provided by the default tools**. Which is to say _plumbing_ and _sane
 defaults_ matter. You get to enjoy the very tools that you are accustomed to,
 with the benefits of a faster and safer language.
 
-> [!INFO]
+> [!IMPORTANT]
 > Future goals of NH include providing support for lower-levels tools, such as
 > `nixos-install`, and `nixos-generate-config` to become a drop-in replacement
 > for most critical tools with the benefits of Rust. If you would like to
