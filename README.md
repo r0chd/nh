@@ -304,11 +304,11 @@ the common variables that you may encounter or choose to employ are as follows:
     elevated commands. Set to `"0"` to disable preservation, `"1"` to force
     preservation. If unset, preservation defaults to enabled.
 
-- `NH_SHOW_SYSTEMCTL_HINTS`
-  - Whether to parse activation logs and isolate specific unit failures to
-    display them at the end of activation. Setting this to `"1"` allows
-    replicating the default behaviour from `nixos-rebuild` where failing units
-    are displayed at the end.
+- `NH_SHOW_ACTIVATION_LOGS`
+  - Controls whether activation output is displayed. By default, activation
+    output is hidden. Setting this to `"1"` will show the full activation logs,
+    which is useful for debugging activation failures. Supported on all
+    platforms (NixOS, Home Manager, and Darwin).
 
 - `NH_LOG`
   - Sets the tracing/log filter for NH. This uses the same format as
