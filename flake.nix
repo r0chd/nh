@@ -24,7 +24,7 @@
 
       packages = forAllSystems (pkgs: {
         nh = pkgs.callPackage ./package.nix { inherit rev; };
-        default = self.packages.${pkgs.hostPlatform.system}.nh;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.nh;
       });
 
       checks = self.packages // self.devShells;
