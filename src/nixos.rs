@@ -332,6 +332,11 @@ impl OsRebuildArgs {
     let installable = (get_nh_os_flake_env()?)
       .unwrap_or_else(|| self.common.installable.clone());
 
+    let installable = match installable {
+      Installable::Unspecified => Installable::try_find_default_for_os()?,
+      other => other,
+    };
+
     Ok(toplevel_for(
       target_hostname,
       installable,
@@ -916,6 +921,13 @@ pub fn toplevel_for<S: AsRef<str>>(
     } => attribute.extend(toplevel),
 
     Installable::Store { .. } => {},
+
+    Installable::Unspecified => {
+      unreachable!(
+        "Unspecified installable should have been resolved before calling \
+         toplevel_for"
+      )
+    },
   }
 
   res
@@ -924,12 +936,17 @@ pub fn toplevel_for<S: AsRef<str>>(
 impl OsReplArgs {
   fn run(self) -> Result<()> {
     // Use NH_OS_FLAKE if available, otherwise use the provided installable
-    let mut target_installable =
+    let target_installable =
       if let Some(flake_installable) = get_nh_os_flake_env()? {
         flake_installable
       } else {
         self.installable
       };
+
+    let mut target_installable = match target_installable {
+      Installable::Unspecified => Installable::try_find_default_for_os()?,
+      other => other,
+    };
 
     if matches!(target_installable, Installable::Store { .. }) {
       bail!("Nix doesn't support nix store installables.");

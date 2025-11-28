@@ -102,6 +102,11 @@ impl DarwinRebuildArgs {
       self.common.installable.clone()
     };
 
+    let installable = match installable {
+      Installable::Unspecified => Installable::try_find_default_for_darwin()?,
+      other => other,
+    };
+
     let mut processed_installable = installable;
     if let Installable::Flake {
       ref mut attribute, ..
@@ -199,7 +204,7 @@ impl DarwinRebuildArgs {
 impl DarwinReplArgs {
   fn run(self) -> Result<()> {
     // Use NH_DARWIN_FLAKE if available, otherwise use the provided installable
-    let mut target_installable =
+    let target_installable =
       if let Ok(darwin_flake) = env::var("NH_DARWIN_FLAKE") {
         debug!("Using NH_DARWIN_FLAKE: {}", darwin_flake);
 
@@ -220,6 +225,11 @@ impl DarwinReplArgs {
       } else {
         self.installable
       };
+
+    let mut target_installable = match target_installable {
+      Installable::Unspecified => Installable::try_find_default_for_darwin()?,
+      other => other,
+    };
 
     if matches!(target_installable, Installable::Store { .. }) {
       bail!("Nix doesn't support nix store installables.");

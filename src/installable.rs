@@ -23,6 +23,10 @@ pub enum Installable {
     expression: String,
     attribute:  Vec<String>,
   },
+
+  /// Represents a deferred resolution of a missing installable.
+  /// This variant should be resolved to a concrete installable before use.
+  Unspecified,
 }
 
 impl FromArgMatches for Installable {
@@ -137,7 +141,7 @@ impl FromArgMatches for Installable {
       });
     }
 
-    Err(clap::Error::new(ErrorKind::TooFewValues))
+    Ok(Self::Unspecified)
   }
 
   fn update_from_arg_matches(
@@ -212,8 +216,9 @@ Nix accepts various kinds of installables:
   }
 }
 
-// TODO: should handle quoted attributes, like foo."bar.baz" -> ["foo",
-// "bar.baz"] maybe use chumsky?
+// TODO: `parse_attribute` should handle quoted attributes, such as:
+// foo."bar.baz" -> ["foo", "bar.baz"]
+// Maybe we want to use chumsky for this?
 pub fn parse_attribute<S>(s: S) -> Vec<String>
 where
   S: AsRef<str>,
@@ -297,6 +302,13 @@ impl Installable {
           return Vec::new();
         }
       },
+
+      Self::Unspecified => {
+        unreachable!(
+          "Unspecified installable should have been resolved before calling \
+           to_args"
+        )
+      },
     }
 
     res
@@ -364,6 +376,125 @@ impl Installable {
       Self::File { .. } => "file",
       Self::Store { .. } => "store path",
       Self::Expression { .. } => "expression",
+      Self::Unspecified => "unspecified",
+    }
+  }
+
+  /// Attempts to find a default installable for `NixOS` builds.
+  ///
+  /// Checks if `/etc/nixos/flake.nix` exists and returns a flake installable
+  /// pointing to it if found. Otherwise, returns an error with instructions
+  /// on how to specify an installable.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if no flake is found at `/etc/nixos/flake.nix`.
+  pub fn try_find_default_for_os() -> color_eyre::Result<Self> {
+    use tracing::warn;
+
+    let default_path = "/etc/nixos/flake.nix";
+    if fs::metadata(default_path)
+      .map(|m| m.is_file())
+      .unwrap_or(false)
+    {
+      warn!("No installable was specified, falling back to /etc/nixos");
+      Ok(Self::Flake {
+        reference: "/etc/nixos".to_string(),
+        attribute: vec![],
+      })
+    } else {
+      Err(color_eyre::eyre::eyre!(
+        "No installable specified and no flake found at {}.\nPlease \
+         either:\n- Pass a flake path as an argument (e.g., 'nh os switch \
+         .')\n- Set the NH_FLAKE environment variable\n- Set the NH_OS_FLAKE \
+         environment variable",
+        default_path
+      ))
+    }
+  }
+
+  /// Attempts to find a default installable for Home Manager builds.
+  ///
+  /// Checks if `$HOME/.config/home-manager/flake.nix` exists and returns a
+  /// flake installable pointing to it if found. Otherwise, returns an error
+  /// with instructions on how to specify an installable.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if:
+  /// - The `HOME` environment variable is not set
+  /// - No flake is found at `$HOME/.config/home-manager/flake.nix`
+  /// - The home directory path contains invalid UTF-8 characters
+  pub fn try_find_default_for_home() -> color_eyre::Result<Self> {
+    use tracing::warn;
+
+    let home = env::var("HOME").map_err(|_| {
+      color_eyre::eyre::eyre!("HOME environment variable not set")
+    })?;
+    let default_path =
+      PathBuf::from(&home).join(".config/home-manager/flake.nix");
+
+    if fs::metadata(&default_path)
+      .map(|m| m.is_file())
+      .unwrap_or(false)
+    {
+      let default_dir = PathBuf::from(&home).join(".config/home-manager");
+      warn!(
+        "No installable was specified, falling back to {}",
+        default_dir.display()
+      );
+      Ok(Self::Flake {
+        reference: default_dir
+          .to_str()
+          .ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+              "Home directory path contains invalid UTF-8"
+            )
+          })?
+          .to_string(),
+        attribute: vec![],
+      })
+    } else {
+      Err(color_eyre::eyre::eyre!(
+        "No installable specified and no flake found at {}.\nPlease \
+         either:\n- Pass a flake path as an argument (e.g., 'nh home switch \
+         .')\n- Set the NH_FLAKE environment variable\n- Set the \
+         NH_HOME_FLAKE environment variable",
+        default_path.display()
+      ))
+    }
+  }
+
+  /// Attempts to find a default installable for Darwin builds.
+  ///
+  /// Checks if `/etc/nix-darwin/flake.nix` exists and returns a flake
+  /// installable pointing to it if found. Otherwise, returns an error with
+  /// instructions on how to specify an installable.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if no flake is found at `/etc/nix-darwin/flake.nix`.
+  pub fn try_find_default_for_darwin() -> color_eyre::Result<Self> {
+    use tracing::warn;
+
+    let default_path = "/etc/nix-darwin/flake.nix";
+    if fs::metadata(default_path)
+      .map(|m| m.is_file())
+      .unwrap_or(false)
+    {
+      warn!("No installable was specified, falling back to /etc/nix-darwin");
+      Ok(Self::Flake {
+        reference: "/etc/nix-darwin".to_string(),
+        attribute: vec![],
+      })
+    } else {
+      Err(color_eyre::eyre::eyre!(
+        "No installable specified and no flake found at {}.\nPlease \
+         either:\n- Pass a directory path containing flake as an argument \
+         (e.g., 'nh darwin switch .')\n- Set the NH_FLAKE environment \
+         variable\n- Set the NH_DARWIN_FLAKE environment variable",
+        default_path
+      ))
     }
   }
 }

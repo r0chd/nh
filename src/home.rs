@@ -83,6 +83,11 @@ impl HomeRebuildArgs {
       self.common.installable.clone()
     };
 
+    let installable = match installable {
+      Installable::Unspecified => Installable::try_find_default_for_home()?,
+      other => other,
+    };
+
     let toplevel = toplevel_for(
       installable,
       true,
@@ -363,6 +368,12 @@ where
       }
     },
     Installable::Store { .. } => {},
+    Installable::Unspecified => {
+      unreachable!(
+        "Unspecified installable should have been resolved before calling \
+         toplevel_for"
+      )
+    },
   }
 
   Ok(res)
@@ -390,6 +401,11 @@ impl HomeReplArgs {
       }
     } else {
       self.installable
+    };
+
+    let installable = match installable {
+      Installable::Unspecified => Installable::try_find_default_for_home()?,
+      other => other,
     };
 
     let toplevel = toplevel_for(
