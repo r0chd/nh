@@ -83,6 +83,11 @@ impl HomeRebuildArgs {
       self.common.installable.clone()
     };
 
+    let installable = match installable {
+      Installable::Unspecified => Installable::try_find_default_for_home()?,
+      other => other,
+    };
+
     let toplevel = toplevel_for(
       installable,
       true,
@@ -215,9 +220,35 @@ where
       ref reference,
       ref mut attribute,
     } => {
-      // If user explicitly selects some other attribute in the installable
-      // itself then don't push homeConfigurations
       if !attribute.is_empty() {
+        // Check if the path is too specific
+        if attribute[0] == "homeConfigurations" {
+          if attribute.len() > 2 {
+            bail!(
+              "Attribute path is too specific: {}. Home Manager only allows \
+               configuration names. Please either:\n  1. Use the flake \
+               reference without attributes (e.g., '.')\n  2. Specify only \
+               the configuration name (e.g., '.#{}')",
+              attribute.join("."),
+              attribute.get(1).unwrap_or(&"<unknown>".to_string())
+            );
+          }
+        } else if attribute.len() > 1 {
+          // User provided ".#myconfig" or similar - prepend homeConfigurations
+          attribute.insert(0, String::from("homeConfigurations"));
+          // Re-validate after prepending
+          if attribute.len() > 2 {
+            bail!(
+              "Attribute path is too specific: {}. Home Manager only allows \
+               configuration names. Please either:\n  1. Use the flake \
+               reference without attributes (e.g., '.')\n  2. Specify only \
+               the configuration name (e.g., '.#{}')",
+              attribute.join("."),
+              attribute.get(1).unwrap_or(&"<unknown>".to_string())
+            );
+          }
+        }
+
         debug!(
           "Using explicit attribute path from installable: {:?}",
           attribute
@@ -363,6 +394,12 @@ where
       }
     },
     Installable::Store { .. } => {},
+    Installable::Unspecified => {
+      unreachable!(
+        "Unspecified installable should have been resolved before calling \
+         toplevel_for"
+      )
+    },
   }
 
   Ok(res)
@@ -390,6 +427,11 @@ impl HomeReplArgs {
       }
     } else {
       self.installable
+    };
+
+    let installable = match installable {
+      Installable::Unspecified => Installable::try_find_default_for_home()?,
+      other => other,
     };
 
     let toplevel = toplevel_for(

@@ -51,6 +51,15 @@ functionality, under the "Removed" section.
 
 - Fixed the whitespace splitting of self-elevated commands so spaces inside
   quotes don't get separated.
+- Missing or "invalid" installable references are now handled more gracefully.
+  - Previously the error emitted by NH was unhelpful and generic, which
+    negatively affected user experience. NH will now _instead_ fall back to
+    common installable locations _and_ tell you what exactly is missing in the
+    error with instructions.
+  - NH also refused to handle references that contained hostname as a part of
+    the installable such as (`./flake.nix#myHost`) in the past and lead to
+    confusing behaviour for those unfamiliar. Such arguments are now normalized
+    with a warning if NH can parse them.
 
 ### Removed
 

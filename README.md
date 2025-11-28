@@ -250,14 +250,38 @@ Platform specific subcommands are those that implement CLI utilities for
 - `nh home` - reimplements `home-manager`.
 - `nh darwin` - reimplements `darwin-rebuild`.
 
+> [!TIP]
+> NH supports various flags, [environment variables](#environment-variables) and
+> setups to provide the best possible user experience. See the `--help` page for
+> individual subcommands, or `man 1 nh` for more information on each subcommand
+> with examples.
+
 [^1]: `nh os` does not yet provide full feature parity with `nixos-rebuild`.
     While a large collection of subcommands have been implemented, you might be
     missing some features. Please visit
     [#358](https://github.com/nix-community/nh/issues/358) for a roadmap.
 
-> [!TIP]
-> See the help page for individual subcommands, or `man 1 nh` for more
-> information on each subcommand.
+### Command Examples
+
+<!-- markdownlint-disable MD013 -->
+
+| Platform     | Old Command (Without NH)                 | New Command (With NH)          |
+| ------------ | ---------------------------------------- | ------------------------------ |
+| NixOS        | `nixos-rebuild switch --flake .#myHost`  | `nh os switch . -H myHost`     |
+| Darwin       | `darwin-rebuild switch --flake .#myHost` | `nh darwin switch . -H myHost` |
+| Home Manager | `home-manager switch --flake .#myHost`   | `nh home switch . -C myHome`   |
+
+<!-- markdownlint-enable MD013 -->
+
+If the `NH_FLAKE` variable is set, NH allows omitting the path to your flake.
+This is done automatically in the modules for NH in the NixOS and Home-Manager
+modules if `programs.nh.flake` is set.
+
+NH also allows omitting the hostname (`-H`) for NixOS/Darwin and the
+configuration (`-C`) parameters when it can be autodiscovered on the system. For
+example, if `NH_FLAKE` or `NH_OS_FLAKE` is set you may simply run `nh os switch`
+with no additional arguments, and it will automatically resolve
+`nixosConfigurations.<myHost>`.
 
 ## Environment variables
 
@@ -286,9 +310,10 @@ the common variables that you may encounter or choose to employ are as follows:
     assumes you know what you are doing.
 
 - `NH_FLAKE`
-  - Preferred flake path/reference used by NH when running flake-based commands.
-    Historically `FLAKE` was used; NH will migrate `FLAKE` into `NH_FLAKE` if
-    present and the specific `NH_*_FLAKE` vars are not set.
+  - Preferred path/reference to a directory containing your `flake.nix` used by
+    NH when running flake-based commands. Historically `FLAKE` was used; NH will
+    migrate `FLAKE` into `NH_FLAKE` if present and the specific `NH_*_FLAKE`
+    vars are not set.
 
 - `NH_OS_FLAKE`, `NH_HOME_FLAKE`, `NH_DARWIN_FLAKE`
   - Command-specific flake references for `os`, `home`, and `darwin` commands
@@ -367,14 +392,15 @@ contributions are always welcome.
 
 [faukah]: https://github.com/faukah
 [ViperML]: https://github.com/viperML
+[nvd]: https://sr.ht/~khumba/nvd/
+[dix]: https://github.com/bloxx12/dix
+[nix-output-monitor]: https://github.com/maralorn/nix-output-monitor
+[crates]: ./Cargo.toml
 
 NH has had a long history, and it has grown a lot over the years. I, NotAShelf,
 would first like to extend my thanks to [ViperML] for his immense efforts as the
 creator and the first maintainer of NH. I have recently taken over NH, but none
 of this would be possible without him.
-
-[nvd]: https://sr.ht/~khumba/nvd/
-[dix]: https://github.com/bloxx12/dix
 
 Next, I would like to thank the tools we run under the hood. The visualization
 of upgrade diffs are provided by the [dix] crate, which is created by my good
@@ -382,13 +408,10 @@ friend [faukah]. Compared to the previous diffing utility, [nvd], dix is more
 than twice as fast and has been a blessing to NH's diffing experience. Thank
 you!
 
-[nix-output-monitor]: https://github.com/maralorn/nix-output-monitor
-
-Another utility worth a mention is [nix-output-monitor], which NH under the hood
-for the pretty tree of builds. A big shoutout to nix-output-monitor for
-providing many NH users such as myself with pretty build visuals.
-
-[crates]: ./Cargo.toml
+[nix-output-monitor], is also a very good utility worth a mention, which NH uses
+under the hood for the pretty tree of builds. A big shoutout to
+nix-output-monitor for providing many NH users such as myself with pretty build
+visuals.
 
 I also would like to extend my thanks to the many Rust [crates] that power NH
 under the hood and give it its signature UX. Without the beautiful Rust

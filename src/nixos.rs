@@ -332,11 +332,16 @@ impl OsRebuildArgs {
     let installable = (get_nh_os_flake_env()?)
       .unwrap_or_else(|| self.common.installable.clone());
 
-    Ok(toplevel_for(
+    let installable = match installable {
+      Installable::Unspecified => Installable::try_find_default_for_os()?,
+      other => other,
+    };
+
+    toplevel_for(
       target_hostname,
       installable,
       final_attr.map_or("toplevel", |v| v),
-    ))
+    )
   }
 
   fn execute_build_command(
@@ -888,7 +893,7 @@ pub fn toplevel_for<S: AsRef<str>>(
   hostname: S,
   installable: Installable,
   final_attr: &str,
-) -> Installable {
+) -> Result<Installable> {
   let mut res = installable;
   let hostname_str = hostname.as_ref();
 
@@ -900,11 +905,30 @@ pub fn toplevel_for<S: AsRef<str>>(
     Installable::Flake {
       ref mut attribute, ..
     } => {
-      // If user explicitly selects some other attribute, don't push
-      // nixosConfigurations
       if attribute.is_empty() {
         attribute.push(String::from("nixosConfigurations"));
         attribute.push(hostname_str.to_owned());
+      } else if attribute.len() == 1 && attribute[0] == "nixosConfigurations" {
+        info!(
+          "Inferring hostname '{}' for nixosConfigurations",
+          hostname_str
+        );
+        attribute.push(hostname_str.to_owned());
+      } else if attribute[0] == "nixosConfigurations" {
+        if attribute.len() == 2 {
+          // nixosConfigurations.hostname - fine
+        } else if attribute.len() > 2 {
+          bail!(
+            "Attribute path is too specific: {}. Please either:\n  1. Use the \
+             flake reference without attributes (e.g., '.')\n  2. Specify \
+             only the configuration name (e.g., '.#{}')",
+            attribute.join("."),
+            attribute[1]
+          );
+        }
+      } else {
+        // User provided ".#myhost" - prepend nixosConfigurations
+        attribute.insert(0, String::from("nixosConfigurations"));
       }
       attribute.extend(toplevel);
     },
@@ -916,20 +940,32 @@ pub fn toplevel_for<S: AsRef<str>>(
     } => attribute.extend(toplevel),
 
     Installable::Store { .. } => {},
+
+    Installable::Unspecified => {
+      unreachable!(
+        "Unspecified installable should have been resolved before calling \
+         toplevel_for"
+      )
+    },
   }
 
-  res
+  Ok(res)
 }
 
 impl OsReplArgs {
   fn run(self) -> Result<()> {
     // Use NH_OS_FLAKE if available, otherwise use the provided installable
-    let mut target_installable =
+    let target_installable =
       if let Some(flake_installable) = get_nh_os_flake_env()? {
         flake_installable
       } else {
         self.installable
       };
+
+    let mut target_installable = match target_installable {
+      Installable::Unspecified => Installable::try_find_default_for_os()?,
+      other => other,
+    };
 
     if matches!(target_installable, Installable::Store { .. }) {
       bail!("Nix doesn't support nix store installables.");
