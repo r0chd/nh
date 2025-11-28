@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf};
 
 use color_eyre::eyre::{Context, bail, eyre};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
   Result,
@@ -15,7 +15,6 @@ use crate::{
     DarwinSubcommand,
     DiffType,
   },
-  nixos::toplevel_for,
   update::update,
   util::{get_hostname, print_dix_diff},
 };
@@ -107,20 +106,7 @@ impl DarwinRebuildArgs {
       other => other,
     };
 
-    let mut processed_installable = installable;
-    if let Installable::Flake {
-      ref mut attribute, ..
-    } = processed_installable
-    {
-      // If user explicitly selects some other attribute, don't push
-      // darwinConfigurations
-      if attribute.is_empty() {
-        attribute.push(String::from("darwinConfigurations"));
-        attribute.push(hostname.clone());
-      }
-    }
-
-    let toplevel = toplevel_for(hostname, processed_installable, "toplevel");
+    let toplevel = toplevel_for(hostname, installable, "toplevel")?;
 
     commands::Build::new(toplevel)
       .extra_arg("--out-link")
@@ -256,4 +242,75 @@ impl DarwinReplArgs {
 
     Ok(())
   }
+}
+
+pub fn toplevel_for<S: AsRef<str>>(
+  hostname: S,
+  installable: Installable,
+  final_attr: &str,
+) -> Result<Installable> {
+  let mut res = installable;
+  let hostname_str = hostname.as_ref();
+
+  let toplevel = ["config", "system", "build", final_attr]
+    .into_iter()
+    .map(String::from);
+
+  match res {
+    Installable::Flake {
+      ref mut attribute, ..
+    } => {
+      if attribute.is_empty() {
+        attribute.push(String::from("darwinConfigurations"));
+        attribute.push(hostname_str.to_owned());
+      } else if attribute.len() == 1 && attribute[0] == "darwinConfigurations" {
+        info!("Inferring hostname '{hostname_str}' for darwinConfigurations");
+        attribute.push(hostname_str.to_owned());
+      } else if attribute[0] == "darwinConfigurations" {
+        if attribute.len() == 2 {
+          // darwinConfigurations.hostname - fine
+        } else if attribute.len() > 2 {
+          if attribute[2] == "config" {
+            bail!(
+              "Attribute path is too specific: {}. Please either:\n  1. Use \
+               the flake reference without attributes (e.g., '.')\n  2. \
+               Specify only the configuration name (e.g., '.#{}')",
+              attribute.join("."),
+              attribute[1]
+            );
+          } else {
+            bail!(
+              "Unexpected attribute path: {}. Please specify only the \
+               configuration name (e.g., '.#{}')",
+              attribute.join("."),
+              attribute[1]
+            );
+          }
+        }
+      } else {
+        // User provided ".#myhost" - prepend darwinConfigurations
+        attribute.insert(0, String::from("darwinConfigurations"));
+      }
+      attribute.extend(toplevel);
+    },
+    Installable::File {
+      ref mut attribute, ..
+    }
+    | Installable::Expression {
+      ref mut attribute, ..
+    } => attribute.extend(toplevel),
+
+    Installable::Store { .. } => {
+      bail!("Nix doesn't support nix store installables.");
+    },
+
+    Installable::Unspecified => {
+      unreachable!(
+        "Unspecified installable should have been resolved before calling \
+         toplevel_for"
+      )
+    },
+  }
+
+  Ok(res)
 }

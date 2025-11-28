@@ -337,11 +337,11 @@ impl OsRebuildArgs {
       other => other,
     };
 
-    Ok(toplevel_for(
+    toplevel_for(
       target_hostname,
       installable,
       final_attr.map_or("toplevel", |v| v),
-    ))
+    )
   }
 
   fn execute_build_command(
@@ -893,7 +893,7 @@ pub fn toplevel_for<S: AsRef<str>>(
   hostname: S,
   installable: Installable,
   final_attr: &str,
-) -> Installable {
+) -> Result<Installable> {
   let mut res = installable;
   let hostname_str = hostname.as_ref();
 
@@ -905,11 +905,30 @@ pub fn toplevel_for<S: AsRef<str>>(
     Installable::Flake {
       ref mut attribute, ..
     } => {
-      // If user explicitly selects some other attribute, don't push
-      // nixosConfigurations
       if attribute.is_empty() {
         attribute.push(String::from("nixosConfigurations"));
         attribute.push(hostname_str.to_owned());
+      } else if attribute.len() == 1 && attribute[0] == "nixosConfigurations" {
+        info!(
+          "Inferring hostname '{}' for nixosConfigurations",
+          hostname_str
+        );
+        attribute.push(hostname_str.to_owned());
+      } else if attribute[0] == "nixosConfigurations" {
+        if attribute.len() == 2 {
+          // nixosConfigurations.hostname - fine
+        } else if attribute.len() > 2 {
+          bail!(
+            "Attribute path is too specific: {}. Please either:\n  1. Use the \
+             flake reference without attributes (e.g., '.')\n  2. Specify \
+             only the configuration name (e.g., '.#{}')",
+            attribute.join("."),
+            attribute[1]
+          );
+        }
+      } else {
+        // User provided ".#myhost" - prepend nixosConfigurations
+        attribute.insert(0, String::from("nixosConfigurations"));
       }
       attribute.extend(toplevel);
     },
@@ -930,7 +949,7 @@ pub fn toplevel_for<S: AsRef<str>>(
     },
   }
 
-  res
+  Ok(res)
 }
 
 impl OsReplArgs {
