@@ -46,6 +46,9 @@ functionality, under the "Removed" section.
     Manager and Darwin. The logs were previously always visible.
   - The flag can be set globally via the `NH_SHOW_ACTIVATION_LOGS` environment
     variable.
+  - `nh search` displays a link to the `package.nix` file on the nixpkgs GitHub,
+    and also fixes the existing links so that they no longer brokenly point to a
+    non-existent file path on nix flake systems.
 
 ### Fixed
 

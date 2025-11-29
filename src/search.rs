@@ -44,12 +44,23 @@ struct SearchResult {
   package_position:        Option<String>,
 }
 
-macro_rules! print_hyperlink {
-  ($text:expr, $link:expr) => {
-    print!("\x1b]8;;{}\x07", $link);
-    print!("{}", Paint::new($text).underline());
+// Cache the hyperlink support check result
+static HYPERLINKS_SUPPORTED: OnceLock<bool> = OnceLock::new();
+
+/// Prints an underlined link in the terminal, where the visible text may be
+/// different from the link - or just print the text if hyperlinks aren't
+/// supported
+fn print_hyperlink(text: &str, link: &str) {
+  let hyperlinks =
+    *HYPERLINKS_SUPPORTED.get_or_init(supports_hyperlinks::supports_hyperlinks);
+
+  if hyperlinks {
+    print!("\x1b]8;;{link}\x07");
+    print!("{}", Paint::new(text).underline());
     println!("\x1b]8;;\x07");
-  };
+  } else {
+    println!("{text}");
+  }
 }
 
 #[derive(Debug, Serialize)]
@@ -77,10 +88,28 @@ impl SearchArgs {
       bail!("Channel {channel} is not supported!");
     }
 
-    let nixpkgs_path = std::thread::spawn(|| {
-      std::process::Command::new("nix")
-        .stderr(Stdio::inherit())
+    let flake_ref = if channel == "nixos-unstable" {
+      "github:NixOS/nixpkgs/nixos-unstable".to_string()
+    } else if channel.starts_with("nixos-") {
+      format!("github:NixOS/nixpkgs/{channel}")
+    } else {
+      "nixpkgs".to_string() // fallback to registry default
+    };
+
+    let nixpkgs_path = std::thread::spawn(move || {
+      if let Ok(output) = std::process::Command::new("nix")
+        .stderr(Stdio::null())
         .args(["eval", "-f", "<nixpkgs>", "path"])
+        .output()
+      {
+        if output.status.success() {
+          return Ok(output);
+        }
+      }
+
+      std::process::Command::new("nix")
+        .stderr(Stdio::null())
+        .args(["eval", "--raw", &format!("{flake_ref}#path")])
         .output()
     });
 
@@ -212,18 +241,24 @@ impl SearchArgs {
       return Ok(());
     }
 
-    let hyperlinks = supports_hyperlinks::supports_hyperlinks();
-    debug!(?hyperlinks);
-
     let nixpkgs_path_output = nixpkgs_path.join().map_err(|e| {
       color_eyre::eyre::eyre!("nixpkgs_path thread panicked: {e:?}")
     })?;
+    debug!("{nixpkgs_path_output:?}");
 
-    let nixpkgs_path_output =
-      nixpkgs_path_output.context("Evaluating the nixpkgs path location")?;
+    let nixpkgs_path = nixpkgs_path_output
+      .ok()
+      .and_then(|output| {
+        if output.status.success() {
+          String::from_utf8(output.stdout).ok()
+        } else {
+          None
+        }
+      })
+      .map(|s| s.trim().to_string())
+      .unwrap_or_default();
 
-    let nixpkgs_path = String::from_utf8(nixpkgs_path_output.stdout)
-      .context("Converting nixpkgs_path to UTF-8")?;
+    debug!("nixpkgs_path: {:?}", nixpkgs_path);
 
     for elem in documents.iter().rev() {
       println!();
@@ -246,35 +281,39 @@ impl SearchArgs {
 
       for url in &elem.package_homepage {
         print!("  Homepage: ");
-        if hyperlinks {
-          print_hyperlink!(url, url);
-        } else {
-          println!("{url}");
-        }
+        print_hyperlink(url, url);
       }
 
       if self.platforms && !elem.package_platforms.is_empty() {
         println!("  Platforms: {}", elem.package_platforms.join(", "));
       }
 
-      if let Some(position) = &elem.package_position {
-        let position = position
-          .split(':')
-          .next()
-          .expect("Position should have at least one part");
-        print!("  Defined at: ");
-        if hyperlinks {
-          let position_trimmed = position
-            .split(':')
-            .next()
-            .expect("Removing line number from position");
+      if let Some(package_position) = &elem.package_position {
+        match package_position.split(':').next() {
+          Some(position) => {
+            // Position from search.nixos.org is already a relative path
+            // like "pkgs/by-name/..."
+            if !nixpkgs_path.is_empty() {
+              print!("  Defined at: ");
+              print_hyperlink(
+                position,
+                &format!("file://{nixpkgs_path}/{position}"),
+              );
 
-          print_hyperlink!(
-            position,
-            format!("file://{nixpkgs_path}/{position_trimmed}")
-          );
-        } else {
-          println!("{position}");
+              let github_nixpkgs_url =
+                format!("https://github.com/NixOS/nixpkgs/blob/{channel}");
+
+              print!("  GitHub link: ");
+              let url = format!("{github_nixpkgs_url}/{position}");
+              print_hyperlink(&url, &url);
+            }
+          },
+          None => {
+            warn!(
+              "Position should have at least one part; received \
+               {package_position}"
+            );
+          },
         }
       }
     }
