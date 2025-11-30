@@ -2,8 +2,9 @@
   lib,
   stdenv,
   rustPlatform,
-  installShellFiles,
   makeBinaryWrapper,
+  installShellFiles,
+  versionCheckHook,
   use-nom ? true,
   nix-output-monitor ? null,
   rev ? "dirty",
@@ -13,7 +14,7 @@ let
   runtimeDeps = lib.optionals use-nom [ nix-output-monitor ];
   cargoToml = lib.importTOML ./Cargo.toml;
 in
-rustPlatform.buildRustPackage {
+rustPlatform.buildRustPackage (finalAttrs: {
   pname = "nh";
   version = "${cargoToml.workspace.package.version}-${rev}";
 
@@ -22,6 +23,7 @@ rustPlatform.buildRustPackage {
     fileset = lib.fileset.intersection (lib.fileset.fromSource (lib.sources.cleanSource ./.)) (
       lib.fileset.unions [
         ./.cargo
+        ./.config
         ./src
         ./xtask
         ./Cargo.toml
@@ -31,31 +33,50 @@ rustPlatform.buildRustPackage {
   };
 
   strictDeps = true;
-  nativeBuildInputs = [ makeBinaryWrapper ];
+  nativeBuildInputs = [
+    installShellFiles
+    makeBinaryWrapper
+  ];
 
   cargoLock.lockFile = ./Cargo.lock;
+
+  cargoBuildFlags = [
+    "--bin"
+    "nh"
+  ];
 
   postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
     # Run both shell completion and manpage generation tasks. Unlike the
     # fine-grained variants, the 'dist' command doesn't allow specifying the
     # path but that's fine, because we can simply install them from the implicit
     # output directories.
+    # XXX: this requires 'cargo' to be available and '.cargo' to provide an
+    # alias for 'cargo run --package xtask'.
     cargo xtask dist
 
     # The dist task above should've created
     #  1. Shell completions in comp/
     #  2. The NH manpage (nh.1) in man/
     # Let's install those.
-    for dir in comp man; do
-      mkdir -p "$out/share/$dir"
-      cp -rf "$dir" "$out/share/"
-    done
+    installManPage ./man/nh.1
+    installShellCompletion --cmd ${finalAttrs.meta.mainProgram} ./comp/*
   '';
 
   postFixup = ''
     wrapProgram $out/bin/nh \
       --prefix PATH : ${lib.makeBinPath runtimeDeps}
   '';
+
+  nativeInstallCheckInputs = [ versionCheckHook ];
+  doInstallCheck = true;
+  versionCheckProgram = "${placeholder "out"}/bin/${finalAttrs.meta.mainProgram}";
+  versionCheckProgramArg = "--version";
+
+  # Besides the install check, we have a bunch of tests to run. Nextest is
+  # the fastest way of running those since it's significantly faster than
+  # `cargo test`, and has a nicer UI with CI-friendly characteristics.
+  useNextest = true;
+  cargoTestFlags = [ "-p nh" ];
 
   env.NH_REV = rev;
 
@@ -70,4 +91,4 @@ rustPlatform.buildRustPackage {
       viperML
     ];
   };
-}
+})
