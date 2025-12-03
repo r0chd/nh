@@ -374,12 +374,16 @@ enum FallbackError {
   Io(std::io::Error),
 }
 
-/// Resolves a fallback flake directory
+/// Resolves a fallback flake directory.
 ///
 /// # Returns
 ///
-/// The resolved path if the directory exists and contains a flake.nix.
-/// The returned path is canonicalized if the directory is a symlink.
+/// The resolved path to use as a flake reference. This handles three cases:
+///
+/// 1. Directory is a symlink -> returns the resolved directory path
+/// 2. Directory is real but flake.nix is a symlink → returns the parent
+///    directory of the resolved flake.nix
+/// 3. Both are real -> returns the original directory
 ///
 /// # Errors
 ///
@@ -394,7 +398,10 @@ fn resolve_fallback_flake_dir(
 ) -> Result<PathBuf, FallbackError> {
   use std::io::ErrorKind;
 
-  // Resolve symlinks to get the canonical path
+  // Check if the directory itself is a symlink
+  let dir_is_symlink = dir.is_symlink();
+
+  // Resolve the directory path
   let resolved_dir = match fs::canonicalize(dir) {
     Ok(p) => p,
     Err(e) => {
@@ -408,20 +415,64 @@ fn resolve_fallback_flake_dir(
     },
   };
 
-  // Check if flake.nix exists in the resolved directory
+  // If the directory itself was a symlink, use the resolved directory
+  if dir_is_symlink {
+    let flake_path = resolved_dir.join("flake.nix");
+    return match fs::metadata(&flake_path) {
+      Ok(m) if m.is_file() => Ok(resolved_dir),
+      Ok(_) => Err(FallbackError::NotFound),
+      Err(e) => {
+        match e.kind() {
+          ErrorKind::NotFound => Err(FallbackError::NotFound),
+          ErrorKind::PermissionDenied => {
+            Err(FallbackError::PermissionDenied(flake_path))
+          },
+          _ => Err(FallbackError::Io(e)),
+        }
+      },
+    };
+  }
+
+  // Directory is real, check flake.nix
   let flake_path = resolved_dir.join("flake.nix");
-  match fs::metadata(&flake_path) {
-    Ok(m) if m.is_file() => Ok(resolved_dir),
-    Ok(_) => Err(FallbackError::NotFound), // exists but not a file
-    Err(e) => {
-      match e.kind() {
-        ErrorKind::NotFound => Err(FallbackError::NotFound),
-        ErrorKind::PermissionDenied => {
-          Err(FallbackError::PermissionDenied(flake_path))
-        },
-        _ => Err(FallbackError::Io(e)),
-      }
-    },
+
+  // Check if flake.nix is a symlink
+  if flake_path.is_symlink() {
+    // Resolve the symlink to get the actual flake.nix location
+    match fs::canonicalize(&flake_path) {
+      Ok(resolved_flake) => {
+        // Use the parent directory of the resolved flake.nix
+        resolved_flake
+          .parent()
+          .map_or(Err(FallbackError::NotFound), |parent| {
+            Ok(parent.to_path_buf())
+          })
+      },
+      Err(e) => {
+        match e.kind() {
+          ErrorKind::NotFound => Err(FallbackError::NotFound),
+          ErrorKind::PermissionDenied => {
+            Err(FallbackError::PermissionDenied(flake_path))
+          },
+          _ => Err(FallbackError::Io(e)),
+        }
+      },
+    }
+  } else {
+    // flake.nix is a real file, check it exists
+    match fs::metadata(&flake_path) {
+      Ok(m) if m.is_file() => Ok(resolved_dir),
+      Ok(_) => Err(FallbackError::NotFound),
+      Err(e) => {
+        match e.kind() {
+          ErrorKind::NotFound => Err(FallbackError::NotFound),
+          ErrorKind::PermissionDenied => {
+            Err(FallbackError::PermissionDenied(flake_path))
+          },
+          _ => Err(FallbackError::Io(e)),
+        }
+      },
+    }
   }
 }
 
