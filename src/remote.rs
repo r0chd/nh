@@ -304,6 +304,20 @@ fn get_flake_flags() -> Vec<&'static str> {
   }
 }
 
+/// Convert `OsString` arguments to UTF-8 Strings.
+///
+/// Returns an error if any argument is not valid UTF-8.
+fn convert_extra_args(extra_args: &[OsString]) -> Result<Vec<String>> {
+  extra_args
+    .iter()
+    .map(|s| {
+      s.to_str()
+        .map(String::from)
+        .ok_or_else(|| eyre!("Extra argument is not valid UTF-8: {:?}", s))
+    })
+    .collect::<Result<Vec<_>>>()
+}
+
 /// Run a command on a remote host via SSH.
 fn run_remote_command(
   host: &RemoteHost,
@@ -657,6 +671,10 @@ fn build_on_remote(
   let drv_with_outputs = format!("{drv_path}^*");
 
   if config.use_nom {
+    // Check that nom is available before attempting to use it
+    which::which("nom")
+      .wrap_err("nom (nix-output-monitor) is required but not found in PATH")?;
+
     // With nom: pipe through nix-output-monitor
     build_on_remote_with_nom(host, &drv_with_outputs, config)
   } else {
@@ -679,15 +697,7 @@ fn build_on_remote_simple(
   args.extend(["build", drv_with_outputs, "--print-out-paths"]);
 
   // Convert extra args to strings, fail if any are non-UTF-8
-  let extra_args_strings: Vec<String> = config
-    .extra_args
-    .iter()
-    .map(|s| {
-      s.to_str()
-        .map(String::from)
-        .ok_or_else(|| eyre!("Extra argument is not valid UTF-8: {:?}", s))
-    })
-    .collect::<Result<Vec<_>>>()?;
+  let extra_args_strings = convert_extra_args(&config.extra_args)?;
   for arg in &extra_args_strings {
     args.push(arg);
   }
@@ -728,15 +738,7 @@ fn build_on_remote_with_nom(
   ]);
 
   // Convert extra args to strings, fail if any are non-UTF-8
-  let extra_args_strings: Vec<String> = config
-    .extra_args
-    .iter()
-    .map(|s| {
-      s.to_str()
-        .map(String::from)
-        .ok_or_else(|| eyre!("Extra argument is not valid UTF-8: {:?}", s))
-    })
-    .collect::<Result<Vec<_>>>()?;
+  let extra_args_strings = convert_extra_args(&config.extra_args)?;
   for arg in &extra_args_strings {
     remote_args.push(arg);
   }

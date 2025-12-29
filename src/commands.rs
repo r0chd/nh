@@ -36,15 +36,6 @@ fn cache_password(host: &str, password: SecretString) {
   guard.insert(host.to_string(), password);
 }
 
-/// Parse a command line string respecting quoted arguments.
-///
-/// Splits the command line by whitespace while preserving spaces within
-/// single or double quoted strings. Quote characters are removed from
-/// the resulting tokens.
-fn parse_cmdline_with_quotes(cmdline: &str) -> Vec<String> {
-  shlex::split(cmdline).unwrap_or_default()
-}
-
 fn ssh_wrap(
   cmd: Exec,
   ssh: Option<&str>,
@@ -1280,27 +1271,27 @@ mod tests {
 
   #[test]
   fn test_parse_cmdline_simple() {
-    let result = parse_cmdline_with_quotes("cmd arg1 arg2 arg3");
+    let result = shlex::split("cmd arg1 arg2 arg3").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg1", "arg2", "arg3"]);
   }
 
   #[test]
   fn test_parse_cmdline_with_single_quotes() {
-    let result = parse_cmdline_with_quotes("cmd 'arg with spaces' arg2");
+    let result = shlex::split("cmd 'arg with spaces' arg2").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg with spaces", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_with_double_quotes() {
-    let result = parse_cmdline_with_quotes(r#"cmd "arg with spaces" arg2"#);
+    let result =
+      shlex::split(r#"cmd "arg with spaces" arg2"#).unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg with spaces", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_mixed_quotes() {
-    let result = parse_cmdline_with_quotes(
-      r#"cmd 'single quoted' "double quoted" normal"#,
-    );
+    let result = shlex::split(r#"cmd 'single quoted' "double quoted" normal"#)
+      .unwrap_or_default();
     assert_eq!(result, vec![
       "cmd",
       "single quoted",
@@ -1311,8 +1302,8 @@ mod tests {
 
   #[test]
   fn test_parse_cmdline_with_equals_in_quotes() {
-    let result =
-      parse_cmdline_with_quotes("sudo env 'PATH=/path/with spaces' /bin/cmd");
+    let result = shlex::split("sudo env 'PATH=/path/with spaces' /bin/cmd")
+      .unwrap_or_default();
     assert_eq!(result, vec![
       "sudo",
       "env",
@@ -1323,25 +1314,25 @@ mod tests {
 
   #[test]
   fn test_parse_cmdline_multiple_spaces() {
-    let result = parse_cmdline_with_quotes("cmd    arg1     arg2");
+    let result = shlex::split("cmd    arg1     arg2").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg1", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_leading_trailing_spaces() {
-    let result = parse_cmdline_with_quotes("  cmd arg1 arg2  ");
+    let result = shlex::split("  cmd arg1 arg2  ").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg1", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_empty_string() {
-    let result = parse_cmdline_with_quotes("");
+    let result = shlex::split("").unwrap_or_default();
     assert_eq!(result, Vec::<String>::default());
   }
 
   #[test]
   fn test_parse_cmdline_only_spaces() {
-    let result = parse_cmdline_with_quotes("   ");
+    let result = shlex::split("   ").unwrap_or_default();
     assert_eq!(result, Vec::<String>::default());
   }
 
@@ -1349,7 +1340,7 @@ mod tests {
   fn test_parse_cmdline_realistic_sudo() {
     let cmdline =
       r#"/usr/bin/sudo env 'PATH=/path with spaces' /usr/bin/nh clean all"#;
-    let result = parse_cmdline_with_quotes(cmdline);
+    let result = shlex::split(cmdline).unwrap_or_default();
     assert_eq!(result, vec![
       "/usr/bin/sudo",
       "env",
@@ -1431,30 +1422,31 @@ mod tests {
   fn test_parse_cmdline_escaped_quotes() {
     // shlex handles backslash escapes within double quotes
     let result =
-      parse_cmdline_with_quotes(r#"cmd "arg with \"escaped\" quotes""#);
+      shlex::split(r#"cmd "arg with \"escaped\" quotes""#).unwrap_or_default();
     assert_eq!(result, vec!["cmd", r#"arg with "escaped" quotes"#]);
   }
 
   #[test]
   fn test_parse_cmdline_nested_quotes() {
     // Single quotes inside double quotes are preserved literally
-    let result = parse_cmdline_with_quotes(r#"cmd "it's a test""#);
+    let result = shlex::split(r#"cmd "it's a test""#).unwrap_or_default();
     assert_eq!(result, vec!["cmd", "it's a test"]);
   }
 
   #[test]
   fn test_parse_cmdline_backslash_outside_quotes() {
     // Backslash escapes space outside quotes
-    let result = parse_cmdline_with_quotes(r"cmd arg\ with\ space");
+    let result = shlex::split(r"cmd arg\ with\ space").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg with space"]);
   }
 
   #[test]
   fn test_parse_cmdline_nix_store_paths() {
     // Typical nix store paths should work
-    let result = parse_cmdline_with_quotes(
+    let result = shlex::split(
       "/nix/store/abc123-foo/bin/cmd --flag /nix/store/def456-bar",
-    );
+    )
+    .unwrap_or_default();
     assert_eq!(result, vec![
       "/nix/store/abc123-foo/bin/cmd",
       "--flag",
@@ -1465,14 +1457,15 @@ mod tests {
   #[test]
   fn test_parse_cmdline_env_vars_in_quotes() {
     // Environment variable syntax should be preserved
-    let result = parse_cmdline_with_quotes(r#"env "PATH=$HOME/bin:$PATH" cmd"#);
+    let result =
+      shlex::split(r#"env "PATH=$HOME/bin:$PATH" cmd"#).unwrap_or_default();
     assert_eq!(result, vec!["env", "PATH=$HOME/bin:$PATH", "cmd"]);
   }
 
   #[test]
   fn test_parse_cmdline_unclosed_quote_returns_none() {
     // shlex returns None for unclosed quotes, we return empty vec
-    let result = parse_cmdline_with_quotes("cmd 'unclosed");
+    let result = shlex::split("cmd 'unclosed").unwrap_or_default();
     assert_eq!(result, Vec::<String>::default());
   }
 
@@ -1480,7 +1473,7 @@ mod tests {
   fn test_parse_cmdline_complex_sudo_command() {
     // Complex sudo command with multiple quoted args
     let cmdline = r#"/usr/bin/sudo -E env 'HOME=/root' "PATH=/usr/bin" /usr/bin/nh os switch"#;
-    let result = parse_cmdline_with_quotes(cmdline);
+    let result = shlex::split(cmdline).unwrap_or_default();
     assert_eq!(result, vec![
       "/usr/bin/sudo",
       "-E",
