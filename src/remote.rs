@@ -1,4 +1,14 @@
-use std::{env, ffi::OsString, path::PathBuf, sync::OnceLock};
+use std::{
+  env,
+  ffi::OsString,
+  io::Read,
+  path::PathBuf,
+  sync::{
+    Arc,
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+  },
+};
 
 use color_eyre::{
   Result,
@@ -8,6 +18,35 @@ use subprocess::{Exec, ExitStatus, Redirection};
 use tracing::{debug, info};
 
 use crate::{installable::Installable, util::NixVariant};
+
+/// Global flag indicating whether a SIGINT (Ctrl+C) was received.
+static INTERRUPTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Get or initialize the interrupt flag.
+///
+/// Returns a reference to the shared interrupt flag, initializing it on first
+/// call.
+fn get_interrupt_flag() -> &'static Arc<AtomicBool> {
+  INTERRUPTED.get_or_init(|| Arc::new(AtomicBool::new(false)))
+}
+
+/// Register a SIGINT handler that sets the global interrupt flag.
+///
+/// This function is idempotent - multiple calls are safe and will not
+/// create multiple handlers. Uses `signal_hook::flag::register` which
+/// is async-signal-safe.
+///
+/// # Errors
+///
+/// Returns an error if the signal handler cannot be registered.
+fn register_interrupt_handler() -> Result<()> {
+  use signal_hook::{consts::SIGINT, flag};
+
+  flag::register(SIGINT, Arc::clone(get_interrupt_flag()))
+    .context("Failed to register SIGINT handler")?;
+
+  Ok(())
+}
 
 /// Guard that cleans up SSH `ControlMaster` sockets on drop.
 ///
@@ -151,6 +190,12 @@ pub struct RemoteHost {
 
 impl RemoteHost {
   /// Get the hostname part (without user@ prefix).
+  ///
+  /// # Panics
+  ///
+  /// This function will never panic in practice because `rsplit('@').next()`
+  /// always returns at least one element (the original string if no '@'
+  /// exists).
   #[must_use]
   pub fn hostname(&self) -> &str {
     #[allow(clippy::unwrap_used)]
@@ -689,7 +734,10 @@ fn build_on_remote_simple(
   drv_with_outputs: &str,
   config: &RemoteBuildConfig,
 ) -> Result<String> {
-  // Get flake flags for the remote nix command
+  // Register interrupt handler at start
+  register_interrupt_handler()?;
+
+  let ssh_opts = get_ssh_opts();
   let flake_flags = get_flake_flags();
 
   let mut args: Vec<&str> = vec!["nix"];
@@ -702,11 +750,70 @@ fn build_on_remote_simple(
     args.push(arg);
   }
 
-  let result = run_remote_command(host, &args, true)?
-    .ok_or_else(|| eyre!("Remote build returned no output"))?;
+  // Quote for shell
+  let quoted_remote: Vec<String> =
+    args.iter().map(|a| shell_quote(a)).collect();
+
+  // Build SSH command with stdout capture
+  let mut ssh_cmd = Exec::cmd("ssh");
+  for opt in &ssh_opts {
+    ssh_cmd = ssh_cmd.arg(opt);
+  }
+  ssh_cmd = ssh_cmd
+    .arg(&host.host)
+    .arg(quoted_remote.join(" "))
+    .stdout(Redirection::Pipe)
+    .stderr(Redirection::Pipe);
+
+  // Execute with popen to get process handle
+  let mut process = ssh_cmd.popen()?;
+
+  // Wait for completion with interrupt checking
+  let exit_status = loop {
+    match process.wait_timeout(std::time::Duration::from_millis(100))? {
+      Some(status) => break status,
+      None => {
+        // Check interrupt flag while waiting
+        if get_interrupt_flag().load(Ordering::Relaxed) {
+          debug!("Interrupt detected, killing SSH process");
+          let _ = process.kill();
+          let _ = process.wait(); // Reap zombie
+          bail!("Operation interrupted by user");
+        }
+      },
+    }
+  };
+
+  // Check if we were interrupted between wait completion and here
+  if get_interrupt_flag().load(Ordering::Relaxed) {
+    debug!("Interrupt detected after process completion");
+    bail!("Operation interrupted by user");
+  }
+
+  // Check exit status
+  if !exit_status.success() {
+    let stderr = process
+      .stderr
+      .take()
+      .and_then(|mut e| {
+        let mut s = String::new();
+        e.read_to_string(&mut s).ok().map(|_| s)
+      })
+      .unwrap_or_else(|| String::from("(no stderr)"));
+    bail!("Remote command failed: {}", stderr);
+  }
+
+  // Read stdout
+  let stdout = process
+    .stdout
+    .take()
+    .ok_or_else(|| eyre!("Failed to capture stdout"))?;
+  let mut reader = std::io::BufReader::new(stdout);
+  let mut output = String::new();
+  reader.read_to_string(&mut output)?;
 
   // --print-out-paths may return multiple lines; take first
-  let out_path = result
+  let out_path = output
     .lines()
     .next()
     .ok_or_else(|| eyre!("Remote build returned empty output"))?
@@ -723,6 +830,9 @@ fn build_on_remote_with_nom(
   drv_with_outputs: &str,
   config: &RemoteBuildConfig,
 ) -> Result<String> {
+  // Register interrupt handler at start
+  register_interrupt_handler()?;
+
   let ssh_opts = get_ssh_opts();
   let flake_flags = get_flake_flags();
 
@@ -772,9 +882,20 @@ fn build_on_remote_with_nom(
   let mut processes =
     pipeline.popen().wrap_err("Remote build with nom failed")?;
 
-  // Wait for all processes to finish
+  // Wait for all processes to finish, checking for interrupts
   for proc in &mut processes {
     proc.wait()?;
+
+    // Check interrupt flag after each process wait
+    if get_interrupt_flag().load(Ordering::Relaxed) {
+      debug!("Interrupt detected during build with nom");
+      // Kill remaining local processes - this will cause SSH to terminate
+      // the remote command automatically
+      for p in &mut processes {
+        let _ = p.kill();
+      }
+      bail!("Operation interrupted by user");
+    }
   }
 
   // Check the exit status of the FIRST process (ssh -> nix build)
@@ -796,8 +917,16 @@ fn build_on_remote_with_nom(
   query_args.extend(flake_flags.iter().copied());
   query_args.extend(["build", drv_with_outputs, "--print-out-paths"]);
 
-  let result = run_remote_command(host, &query_args, true)?
-    .ok_or_else(|| eyre!("Failed to get output path after build"))?;
+  let result = run_remote_command(host, &query_args, true);
+
+  // Check if interrupted during query
+  if get_interrupt_flag().load(Ordering::Relaxed) {
+    debug!("Interrupt detected during output path query");
+    bail!("Operation interrupted by user");
+  }
+
+  let result =
+    result?.ok_or_else(|| eyre!("Failed to get output path after build"))?;
 
   let out_path = result
     .lines()
@@ -812,6 +941,12 @@ fn build_on_remote_with_nom(
 
 #[cfg(test)]
 mod tests {
+  #![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "Fine in tests"
+  )]
   use proptest::prelude::*;
   use serial_test::serial;
 
@@ -839,7 +974,7 @@ mod tests {
 
     #[test]
     fn hostname_with_user(user in "[a-zA-Z0-9_]+", hostname in "[a-zA-Z0-9_.-]+") {
-        let full = format!("{}@{}", user, hostname);
+        let full = format!("{user}@{hostname}");
         let host = RemoteHost { host: full };
         prop_assert_eq!(host.hostname(), hostname);
     }
@@ -854,7 +989,7 @@ mod tests {
 
     #[test]
     fn parse_valid_user_at_hostname(user in "[a-zA-Z0-9_]+", hostname in "[a-zA-Z0-9_.-]+") {
-        let full = format!("{}@{}", user, hostname);
+        let full = format!("{user}@{hostname}");
         let result = RemoteHost::parse(&full);
         prop_assert!(result.is_ok());
         let host = result.unwrap();
