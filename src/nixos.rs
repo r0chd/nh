@@ -207,6 +207,15 @@ impl OsRebuildActivateArgs {
       }
     }
 
+    // Validate system closure before activation
+    if let Some(target_host) = &self.rebuild.target_host {
+      // For remote activation, validate on the remote host
+      validate_system_closure_remote(target_profile, target_host)?;
+    } else {
+      // For local activation, validate locally
+      validate_system_closure(target_profile)?;
+    }
+
     let switch_to_configuration = target_profile
       .canonicalize()
       .context("Failed to resolve output path")?
@@ -214,10 +223,6 @@ impl OsRebuildActivateArgs {
       .join("switch-to-configuration")
       .canonicalize()
       .context("Failed to resolve switch-to-configuration path")?;
-
-    if !switch_to_configuration.exists() {
-      return Err(missing_switch_to_configuration_error());
-    }
 
     let canonical_out_path =
       switch_to_configuration.to_str().ok_or_else(|| {
@@ -228,6 +233,7 @@ impl OsRebuildActivateArgs {
       let variant_label = match variant {
         Test => "test",
         Switch => "switch",
+        #[allow(clippy::unreachable, reason = "Should never happen.")]
         _ => unreachable!(),
       };
 
@@ -809,6 +815,113 @@ fn run_vm(out_path: &Path) -> Result<()> {
   Ok(())
 }
 
+/// Validates that essential files exist in the system closure.
+///
+/// Checks for  few critical files that must be present in a complete NixOS
+/// system. This is essentially in-line with what nixos-rebuild-ng checks for.
+///
+/// - bin/switch-to-configuration: activation script
+/// - nixos-version: system version identifier
+/// - init: system init script
+/// - sw/bin: system path binaries
+///
+/// # Returns
+///
+/// `Ok(())` if all files exist, or an error listing missing files.
+fn validate_system_closure(system_path: &Path) -> Result<()> {
+  let essential_files = [
+    ("bin/switch-to-configuration", "activation script"),
+    ("nixos-version", "system version identifier"),
+    ("init", "system init script"),
+    ("sw/bin", "system path"),
+  ];
+
+  let mut missing = Vec::new();
+  for (file, description) in &essential_files {
+    let path = system_path.join(file);
+    if !path.exists() {
+      missing.push(format!("  - {file} ({description})"));
+    }
+  }
+
+  if !missing.is_empty() {
+    let missing_list = missing.join("\n");
+    return Err(eyre!(
+      "System closure validation failed. Missing essential files:\n{}\n\nThis \
+       typically happens when:\n1. 'system.switch.enable' is set to false in \
+       your configuration\n2. The build was incomplete or corrupted\n3. \
+       You're using an incomplete derivation\n\nTo fix this:\n1. Check if \
+       'system.switch.enable = false' is set and remove it\n2. Rebuild your \
+       system configuration\n3. If the problem persists, verify your system \
+       closure is complete\n\nSystem path checked: {}",
+      missing_list,
+      system_path.display()
+    ));
+  }
+
+  Ok(())
+}
+
+/// Validates essential files on a remote host via SSH.
+///
+/// Similar to [`validate_system_closure`] but executes checks on a remote host.
+fn validate_system_closure_remote(
+  system_path: &Path,
+  target_host: &str,
+) -> Result<()> {
+  let essential_files = [
+    ("bin/switch-to-configuration", "activation script"),
+    ("nixos-version", "system version identifier"),
+    ("init", "system init script"),
+    ("sw/bin", "system path"),
+  ];
+
+  let mut missing = Vec::new();
+  for (file, description) in &essential_files {
+    let remote_path = system_path.join(file);
+    let path_str = remote_path.to_str().ok_or_else(|| {
+      eyre!("System path is not valid UTF-8: {}", remote_path.display())
+    })?;
+
+    // Use SSH to test if file exists on remote host
+    let check_result = std::process::Command::new("ssh")
+      .args([target_host, "test", "-e", path_str])
+      .output();
+
+    match check_result {
+      Ok(output) if !output.status.success() => {
+        missing.push(format!("  - {file} ({description})"));
+      },
+      Err(e) => {
+        return Err(eyre!(
+          "Failed to check file existence on remote host {}: {}",
+          target_host,
+          e
+        ));
+      },
+      _ => {}, // File exists
+    }
+  }
+
+  if !missing.is_empty() {
+    let missing_list = missing.join("\n");
+    return Err(eyre!(
+      "System closure validation failed on remote host {}. Missing essential \
+       files:\n{}\n\nThis typically happens when:\n1. 'system.switch.enable' \
+       is set to false in your configuration\n2. The build was incomplete or \
+       corrupted\n3. You're using an incomplete derivation\n\nTo fix \
+       this:\n1. Check if 'system.switch.enable = false' is set and remove \
+       it\n2. Rebuild your system configuration\n3. If the problem persists, \
+       verify your system closure is complete\n\nSystem path checked: {}",
+      target_host,
+      missing_list,
+      system_path.display()
+    ));
+  }
+
+  Ok(())
+}
+
 /// Returns an error indicating that the 'switch-to-configuration' binary is
 /// missing, along with common reasons and solutions.
 fn missing_switch_to_configuration_error() -> color_eyre::eyre::Report {
@@ -856,10 +969,12 @@ fn get_nh_os_flake_env() -> Result<Option<Installable>> {
 /// `bypass_root_check` is true).
 ///
 /// # Arguments
+///
 /// * `bypass_root_check` - If true, bypasses the root check and assumes no
 ///   elevation is needed.
 ///
 /// # Errors
+///
 /// Returns an error if `bypass_root_check` is false and the user is root,
 /// as `nh os` subcommands should not be run directly as root.
 fn has_elevation_status(bypass_root_check: bool) -> Result<bool> {
