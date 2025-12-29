@@ -8,6 +8,7 @@ use std::{
     OnceLock,
     atomic::{AtomicBool, Ordering},
   },
+  time::Duration,
 };
 
 use color_eyre::{
@@ -30,6 +31,9 @@ fn get_interrupt_flag() -> &'static Arc<AtomicBool> {
   INTERRUPTED.get_or_init(|| Arc::new(AtomicBool::new(false)))
 }
 
+/// Cache for signal handler registration status.
+static HANDLER_REGISTERED: OnceLock<()> = OnceLock::new();
+
 /// Register a SIGINT handler that sets the global interrupt flag.
 ///
 /// This function is idempotent - multiple calls are safe and will not
@@ -42,8 +46,17 @@ fn get_interrupt_flag() -> &'static Arc<AtomicBool> {
 fn register_interrupt_handler() -> Result<()> {
   use signal_hook::{consts::SIGINT, flag};
 
+  if HANDLER_REGISTERED.get().is_some() {
+    return Ok(());
+  }
+
+  // Not registered yet - register it
   flag::register(SIGINT, Arc::clone(get_interrupt_flag()))
     .context("Failed to register SIGINT handler")?;
+
+  // Mark as registered (race condition here is benign - worst case we register
+  // twice, but both handlers will set the same flag which is fine)
+  let _ = HANDLER_REGISTERED.set(());
 
   Ok(())
 }
@@ -245,12 +258,38 @@ impl RemoteHost {
         hostname_part
       );
     }
+
+    // Check for colons, but allow them in bracketed IPv6 addresses
     if hostname_part.contains(':') {
-      bail!(
-        "Invalid hostname '{}': contains ':'. Ports should be specified via \
-         NIX_SSHOPTS=\"-p 2222\" or ~/.ssh/config",
-        hostname_part
-      );
+      // Check if this is a bracketed IPv6 address
+      let is_bracketed_ipv6 =
+        hostname_part.starts_with('[') && hostname_part.contains(']');
+
+      if !is_bracketed_ipv6 {
+        bail!(
+          "Invalid hostname '{}': contains ':'. Ports should be specified via \
+           NIX_SSHOPTS=\"-p 2222\" or ~/.ssh/config",
+          hostname_part
+        );
+      }
+
+      // Validate bracket matching for IPv6
+      if !hostname_part.ends_with(']') {
+        bail!(
+          "Invalid IPv6 address '{}': contains characters after closing \
+           bracket",
+          hostname_part
+        );
+      }
+
+      let open_count = hostname_part.matches('[').count();
+      let close_count = hostname_part.matches(']').count();
+      if open_count != 1 || close_count != 1 {
+        bail!(
+          "Invalid IPv6 address '{}': mismatched brackets",
+          hostname_part
+        );
+      }
     }
 
     Ok(Self {
@@ -371,21 +410,14 @@ fn run_remote_command(
 ) -> Result<Option<String>> {
   let ssh_opts = get_ssh_opts();
 
-  // Quote args for shell (matching nixos-rebuild-ng's shlex.quote)
-  let quoted_args: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
-
-  debug!(
-    "Running remote command on {}: {}",
-    host,
-    quoted_args.join(" ")
-  );
+  debug!("Running remote command on {}: {}", host, args.join(" "));
 
   let mut cmd = Exec::cmd("ssh");
   for opt in &ssh_opts {
     cmd = cmd.arg(opt);
   }
   cmd = cmd.arg(host.host()).arg("--");
-  for arg in &quoted_args {
+  for arg in args {
     cmd = cmd.arg(arg);
   }
 
@@ -784,12 +816,6 @@ fn build_on_remote_simple(
     }
   };
 
-  // Check if we were interrupted between wait completion and here
-  if get_interrupt_flag().load(Ordering::Relaxed) {
-    debug!("Interrupt detected after process completion");
-    bail!("Operation interrupted by user");
-  }
-
   // Check exit status
   if !exit_status.success() {
     let stderr = process
@@ -882,19 +908,38 @@ fn build_on_remote_with_nom(
   let mut processes =
     pipeline.popen().wrap_err("Remote build with nom failed")?;
 
-  // Wait for all processes to finish, checking for interrupts
-  for proc in &mut processes {
-    proc.wait()?;
+  // Use wait_timeout in a polling loop to check interrupt flag every 100ms
+  let poll_interval = Duration::from_millis(100);
 
-    // Check interrupt flag after each process wait
-    if get_interrupt_flag().load(Ordering::Relaxed) {
-      debug!("Interrupt detected during build with nom");
-      // Kill remaining local processes - this will cause SSH to terminate
-      // the remote command automatically
-      for p in &mut processes {
-        let _ = p.kill();
+  for proc in &mut processes {
+    #[allow(clippy::needless_continue, reason = "Better for explicitness")]
+    loop {
+      // Check interrupt flag before waiting
+      if get_interrupt_flag().load(Ordering::Relaxed) {
+        debug!("Interrupt detected during build with nom");
+        // Kill remaining local processes - this will cause SSH to terminate
+        // the remote command automatically
+        for p in &mut processes {
+          let _ = p.kill();
+          let _ = p.wait(); // Reap zombie
+        }
+        bail!("Operation interrupted by user");
       }
-      bail!("Operation interrupted by user");
+
+      // Poll process with timeout
+      match proc.wait_timeout(poll_interval)? {
+        Some(_) => {
+          // Process has exited, exit status is automatically cached in the
+          // Popen struct Move to next process
+          break;
+        },
+
+        None => {
+          // Timeout elapsed, process still running - loop continues
+          // and will check interrupt flag again
+          continue;
+        },
+      }
     }
   }
 
@@ -1059,6 +1104,89 @@ mod tests {
   }
 
   #[test]
+  fn test_parse_ipv6_bracketed() {
+    let host = RemoteHost::parse("[2001:db8::1]").expect("should parse IPv6");
+    assert_eq!(host.host(), "[2001:db8::1]");
+    assert_eq!(host.hostname(), "[2001:db8::1]");
+  }
+
+  #[test]
+  fn test_parse_ipv6_with_user() {
+    let host = RemoteHost::parse("root@[2001:db8::1]")
+      .expect("should parse IPv6 with user");
+    assert_eq!(host.host(), "root@[2001:db8::1]");
+    assert_eq!(host.hostname(), "[2001:db8::1]");
+  }
+
+  #[test]
+  fn test_parse_ipv6_with_zone_id() {
+    let host =
+      RemoteHost::parse("[fe80::1%eth0]").expect("should parse IPv6 with zone");
+    assert_eq!(host.host(), "[fe80::1%eth0]");
+  }
+
+  #[test]
+  fn test_parse_ipv6_ssh_uri() {
+    let host = RemoteHost::parse("ssh://[2001:db8::1]")
+      .expect("should parse IPv6 SSH URI");
+    assert_eq!(host.host(), "[2001:db8::1]");
+  }
+
+  #[test]
+  fn test_parse_ipv6_ssh_uri_with_user() {
+    let host = RemoteHost::parse("ssh://root@[2001:db8::1]")
+      .expect("should parse IPv6 SSH URI with user");
+    assert_eq!(host.host(), "root@[2001:db8::1]");
+  }
+
+  #[test]
+  fn test_parse_ipv6_localhost() {
+    let host = RemoteHost::parse("[::1]").expect("should parse IPv6 localhost");
+    assert_eq!(host.host(), "[::1]");
+  }
+
+  #[test]
+  fn test_parse_ipv6_compressed() {
+    let host =
+      RemoteHost::parse("[2001:db8::]").expect("should parse compressed IPv6");
+    assert_eq!(host.host(), "[2001:db8::]");
+  }
+
+  #[test]
+  fn test_parse_ipv6_unbracketed_rejected() {
+    // Bare IPv6 without brackets should be rejected
+    let result = RemoteHost::parse("2001:db8::1");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("NIX_SSHOPTS"));
+  }
+
+  #[test]
+  fn test_parse_ipv6_mismatched_brackets_rejected() {
+    assert!(RemoteHost::parse("[2001:db8::1").is_err());
+    assert!(RemoteHost::parse("2001:db8::1]").is_err());
+  }
+
+  #[test]
+  fn test_parse_ipv6_extra_brackets_rejected() {
+    assert!(RemoteHost::parse("[[2001:db8::1]]").is_err());
+    assert!(RemoteHost::parse("[2001:db8::[1]]").is_err());
+  }
+
+  #[test]
+  fn test_parse_ipv6_with_port_rejected() {
+    // IPv6 with port syntax should be rejected (use NIX_SSHOPTS)
+    let result = RemoteHost::parse("[2001:db8::1]:22");
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_parse_ipv6_chars_after_bracket_rejected() {
+    // Characters after closing bracket should be rejected
+    let result = RemoteHost::parse("[2001:db8::1]extra");
+    assert!(result.is_err());
+  }
+
+  #[test]
   fn test_shell_quote_simple() {
     assert_eq!(shell_quote("simple"), "simple");
     assert_eq!(
@@ -1135,6 +1263,15 @@ mod tests {
     unsafe {
       std::env::remove_var("NIX_SSHOPTS");
     }
+  }
+
+  #[test]
+  fn test_shell_quote_behavior() {
+    // Verify shell_quote adds quotes when needed
+    assert_eq!(shell_quote("simple"), "simple");
+    assert_eq!(shell_quote("has space"), "'has space'");
+    // shlex::try_quote uses double quotes when string contains single quote
+    assert_eq!(shell_quote("has'quote"), "\"has'quote\"");
   }
 
   #[test]
