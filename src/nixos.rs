@@ -883,9 +883,15 @@ fn validate_system_closure_remote(
       eyre!("System path is not valid UTF-8: {}", remote_path.display())
     })?;
 
-    // Use SSH to test if file exists on remote host
+    // Use SSH to test if file exists on remote host. We need to quote the path
+    // to prevent shell interpretation of special characters, such as the ones
+    // in `.drv^*`.
+    let quoted_path = shlex::try_quote(path_str).map_err(|_| {
+      eyre!("Failed to quote path for shell: {}", remote_path.display())
+    })?;
+
     let check_result = std::process::Command::new("ssh")
-      .args([target_host, "test", "-e", path_str])
+      .args([target_host, "test", "-e", &quoted_path])
       .output();
 
     match check_result {
