@@ -16,7 +16,7 @@ use color_eyre::{
   eyre::{Context, bail, eyre},
 };
 use subprocess::{Exec, ExitStatus, Redirection};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{installable::Installable, util::NixVariant};
 
@@ -50,12 +50,13 @@ fn register_interrupt_handler() -> Result<()> {
     return Ok(());
   }
 
-  // Not registered yet - register it
+  // Not registered yet, register it
   flag::register(SIGINT, Arc::clone(get_interrupt_flag()))
     .context("Failed to register SIGINT handler")?;
 
-  // Mark as registered (race condition here is benign - worst case we register
-  // twice, but both handlers will set the same flag which is fine)
+  // Mark as registered
+  // The race condition here is benign. Worst case, we register twice, but both
+  // handlers will set the same flag which is fine
   let _ = HANDLER_REGISTERED.set(());
 
   Ok(())
@@ -191,6 +192,7 @@ fn get_ssh_control_dir() -> &'static PathBuf {
 /// A parsed remote host specification.
 ///
 /// Handles various formats:
+///
 /// - `hostname`
 /// - `user@hostname`
 /// - `ssh://[user@]hostname` (scheme stripped)
@@ -253,9 +255,8 @@ impl RemoteHost {
     let hostname_part = host.rsplit('@').next().unwrap_or(host);
     if hostname_part.contains('/') {
       bail!(
-        "Invalid hostname '{}': contains '/'. Did you mean to use a bare \
-         hostname?",
-        hostname_part
+        "Invalid hostname '{hostname_part}': contains '/'. Did you mean to \
+         use a bare hostname?"
       );
     }
 
@@ -326,10 +327,12 @@ fn get_default_ssh_opts() -> Vec<String> {
   ]
 }
 
-/// Shell-quote a string for safe use in SSH commands.
+/// Shell-quote a string for safe passing through SSH to remote shell.
 fn shell_quote(s: &str) -> String {
+  // Use shlex::try_quote for battle-tested quoting
+  // Returns Cow::Borrowed if no quoting needed, Cow::Owned if quoted
   shlex::try_quote(s).map_or_else(
-    |_| format!("'{}'", s.replace('\'', "'\\''")),
+    |_| format!("'{}'", s.replace('\'', r"'\''")),
     std::borrow::Cow::into_owned,
   )
 }
@@ -366,7 +369,7 @@ fn get_nix_sshopts_env() -> String {
     default_opts.join(" ")
   } else {
     // Append our defaults to user options
-    // Note: We preserve user options as-is since nix-copy-closure
+    // NOTE: We preserve user options as-is since nix-copy-closure
     // does simple whitespace splitting
     format!("{} {}", user_opts, default_opts.join(" "))
   }
@@ -376,8 +379,14 @@ fn get_nix_sshopts_env() -> String {
 ///
 /// Returns the flags needed for `--extra-experimental-features "nix-command
 /// flakes"` based on the detected Nix variant:
+///
 /// - Determinate Nix: No flags needed (features are stable)
 /// - Nix/Lix: Returns `["--extra-experimental-features", "nix-command flakes"]`
+///
+/// Technically this is inconsistent with our default behaviour, which is to
+/// *warn* on missing features but since this is for *remote deployment* it is
+/// safer to assist the user instead. Without those features, remote deployment
+/// may never succeed.
 fn get_flake_flags() -> Vec<&'static str> {
   let variant = crate::util::get_nix_variant();
   match variant {
@@ -412,14 +421,13 @@ fn run_remote_command(
 
   debug!("Running remote command on {}: {}", host, args.join(" "));
 
+  let quoted_args: Vec<String> = args.iter().map(|s| shell_quote(s)).collect();
+  let remote_cmd = quoted_args.join(" ");
   let mut cmd = Exec::cmd("ssh");
   for opt in &ssh_opts {
     cmd = cmd.arg(opt);
   }
-  cmd = cmd.arg(host.host()).arg("--");
-  for arg in args {
-    cmd = cmd.arg(arg);
-  }
+  cmd = cmd.arg(host.host()).arg(&remote_cmd);
 
   if capture_stdout {
     cmd = cmd.stdout(Redirection::Pipe).stderr(Redirection::Pipe);
@@ -632,6 +640,27 @@ fn eval_drv_path(installable: &Installable) -> Result<String> {
 }
 
 /// Configuration for a remote build operation.
+///
+/// # Host Interaction Semantics
+///
+/// The behavior depends on which hosts are specified:
+///
+/// | `build_host` | `target_host` | Behavior |
+/// |--------------|---------------|----------|
+/// | Some(H2)     | None          | Build on H2, copy result to localhost |
+/// | Some(H2)     | Some(H2)      | Build on H2, no copy (build host = target) |
+/// | Some(H2)     | Some(H3)      | Build on H2, try direct copy to H3; if that fails, relay through localhost |
+///
+/// When `build_host` and `target_host` differ, the code attempts a direct
+/// copy between remotes first. If this fails (common when the hosts can't
+/// see each other), it falls back to relaying through localhost:
+///
+/// - Direct: Host2 -> Host3
+/// - Fallback: Host2 -> Host1 (localhost) → Host3
+///
+/// If `out_link` is requested in `build_remote()`, the result is always
+/// copied to localhost regardless of whether a direct copy succeeded,
+/// because the symlink must point to a local store path.
 #[derive(Debug, Clone)]
 pub struct RemoteBuildConfig {
   /// The host to build on
@@ -687,6 +716,7 @@ pub fn build_remote(
   //
   // Optimizes copy paths based on hostname comparison:
   // - When build_host != target_host: copy build -> target, then build -> local
+  //   if needed
   // - When build_host == target_host: skip redundant copies, only copy to local
   //   if out-link is needed
   // - When target_host is None: always copy build -> local
@@ -695,34 +725,46 @@ pub fn build_remote(
     .as_ref()
     .is_some_and(|th| th.hostname() == build_host.hostname());
 
-  // Copy from build_host to target_host if they differ
-  if let Some(ref target_host) = config.target_host {
-    if target_is_build_host {
+  let need_local_copy = match &config.target_host {
+    None => true,
+    Some(_target_host) if target_is_build_host => {
       debug!(
         "Skipping copy from build host to target host (same host: {})",
         build_host.hostname()
       );
-    } else {
-      copy_closure_between_remotes(
+      out_link.is_some()
+    },
+    Some(target_host) => {
+      match copy_closure_between_remotes(
         build_host,
         target_host,
         &out_path,
         use_substitutes,
-      )?;
-    }
-  }
-
-  // Copy to localhost only when necessary to avoid ping-pong effect
-  let need_local_copy =
-    config.target_host.is_none() || !target_is_build_host || out_link.is_some();
+      ) {
+        Ok(()) => {
+          debug!(
+            "Successfully copied closure directly from {} to {}",
+            build_host.hostname(),
+            target_host.hostname()
+          );
+          out_link.is_some()
+        },
+        Err(e) => {
+          warn!(
+            "Direct copy from {} to {} failed: {}. Will relay through \
+             localhost.",
+            build_host.hostname(),
+            target_host.hostname(),
+            e
+          );
+          true
+        },
+      }
+    },
+  };
 
   if need_local_copy {
     copy_closure_from(build_host, &out_path, use_substitutes)?;
-  } else {
-    debug!(
-      "Skipping copy to localhost (build_host == target_host, no out-link \
-       needed)"
-    );
   }
 
   // Create local out-link if requested
@@ -760,6 +802,26 @@ fn build_on_remote(
   }
 }
 
+/// Build the argument list for remote nix build commands.
+/// Returns owned strings to avoid lifetime issues with `extra_args`.
+fn build_nix_command(
+  drv_with_outputs: &str,
+  extra_flags: &[&str],
+  extra_args: &[OsString],
+) -> Result<Vec<String>> {
+  let flake_flags = get_flake_flags();
+  let extra_args_strings = convert_extra_args(extra_args)?;
+
+  let mut args = vec!["nix".to_string()];
+  args.extend(flake_flags.iter().map(|s| (*s).to_string()));
+  args.push("build".to_string());
+  args.push(drv_with_outputs.to_string());
+  args.extend(extra_flags.iter().map(|s| (*s).to_string()));
+  args.extend(extra_args_strings);
+
+  Ok(args)
+}
+
 /// Build on remote without nom - just capture output.
 fn build_on_remote_simple(
   host: &RemoteHost,
@@ -770,30 +832,28 @@ fn build_on_remote_simple(
   register_interrupt_handler()?;
 
   let ssh_opts = get_ssh_opts();
-  let flake_flags = get_flake_flags();
 
-  let mut args: Vec<&str> = vec!["nix"];
-  args.extend(flake_flags);
-  args.extend(["build", drv_with_outputs, "--print-out-paths"]);
-
-  // Convert extra args to strings, fail if any are non-UTF-8
-  let extra_args_strings = convert_extra_args(&config.extra_args)?;
-  for arg in &extra_args_strings {
-    args.push(arg);
-  }
-
-  // Quote for shell
-  let quoted_remote: Vec<String> =
-    args.iter().map(|a| shell_quote(a)).collect();
+  let args = build_nix_command(
+    drv_with_outputs,
+    &["--print-out-paths"],
+    &config.extra_args,
+  )?;
+  let arg_refs: Vec<&str> =
+    args.iter().map(std::string::String::as_str).collect();
 
   // Build SSH command with stdout capture
+  // Quote all arguments for safe shell passing
+  let quoted_args: Vec<String> =
+    arg_refs.iter().map(|s| shell_quote(s)).collect();
+  let remote_cmd = quoted_args.join(" ");
+
   let mut ssh_cmd = Exec::cmd("ssh");
   for opt in &ssh_opts {
     ssh_cmd = ssh_cmd.arg(opt);
   }
   ssh_cmd = ssh_cmd
     .arg(&host.host)
-    .arg(quoted_remote.join(" "))
+    .arg(&remote_cmd)
     .stdout(Redirection::Pipe)
     .stderr(Redirection::Pipe);
 
@@ -860,38 +920,31 @@ fn build_on_remote_with_nom(
   register_interrupt_handler()?;
 
   let ssh_opts = get_ssh_opts();
-  let flake_flags = get_flake_flags();
 
   // Build the remote command with JSON output for nom
-  let mut remote_args: Vec<&str> = vec!["nix"];
-  remote_args.extend(flake_flags.iter().copied());
-  remote_args.extend([
-    "build",
+  let remote_args = build_nix_command(
     drv_with_outputs,
-    "--log-format",
-    "internal-json",
-    "--verbose",
-  ]);
-
-  // Convert extra args to strings, fail if any are non-UTF-8
-  let extra_args_strings = convert_extra_args(&config.extra_args)?;
-  for arg in &extra_args_strings {
-    remote_args.push(arg);
-  }
-
-  // Quote for shell
-  let quoted_remote: Vec<String> =
-    remote_args.iter().map(|a| shell_quote(a)).collect();
+    &["--log-format", "internal-json", "--verbose"],
+    &config.extra_args,
+  )?;
+  let arg_refs: Vec<&str> = remote_args
+    .iter()
+    .map(std::string::String::as_str)
+    .collect();
 
   // Build SSH command
+  // Quote all arguments for safe shell passing
+  let quoted_remote: Vec<String> =
+    arg_refs.iter().map(|s| shell_quote(s)).collect();
+  let remote_cmd = quoted_remote.join(" ");
+
   let mut ssh_cmd = Exec::cmd("ssh");
   for opt in &ssh_opts {
     ssh_cmd = ssh_cmd.arg(opt);
   }
   ssh_cmd = ssh_cmd
     .arg(host.host())
-    .arg("--")
-    .args(&quoted_remote)
+    .arg(&remote_cmd)
     .stdout(Redirection::Pipe)
     .stderr(Redirection::Merge);
 
@@ -944,7 +997,7 @@ fn build_on_remote_with_nom(
   }
 
   // Check the exit status of the FIRST process (ssh -> nix build)
-  // This is the one that matters - if the remote build fails, we should fail
+  // This is the one that matters. If the remote build fails, we should fail
   // too
   if let Some(ssh_proc) = processes.first() {
     if let Some(exit_status) = ssh_proc.exit_status() {
@@ -958,11 +1011,12 @@ fn build_on_remote_with_nom(
   // nom consumed the output, so we need to query the output path separately
   // Run nix build again with --print-out-paths (it will be a no-op since
   // already built)
-  let mut query_args: Vec<&str> = vec!["nix"];
-  query_args.extend(flake_flags.iter().copied());
-  query_args.extend(["build", drv_with_outputs, "--print-out-paths"]);
+  let query_args =
+    build_nix_command(drv_with_outputs, &["--print-out-paths"], &[])?;
+  let query_refs: Vec<&str> =
+    query_args.iter().map(std::string::String::as_str).collect();
 
-  let result = run_remote_command(host, &query_args, true);
+  let result = run_remote_command(host, &query_refs, true);
 
   // Check if interrupted during query
   if get_interrupt_flag().load(Ordering::Relaxed) {
