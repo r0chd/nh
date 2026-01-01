@@ -3,6 +3,7 @@ use std::{env, path::PathBuf};
 use anstyle::Style;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::Styles};
 use clap_verbosity_flag::InfoLevel;
+use tracing::warn;
 
 use crate::{
   Result,
@@ -776,8 +777,12 @@ pub struct NixBuildPassthroughArgs {
   #[arg(long)]
   pub no_write_lock_file: bool,
 
-  /// Ignore registries
-  #[arg(long)]
+  /// Do not use registries
+  #[arg(long = "no-use-registries")]
+  pub no_use_registries: bool,
+
+  /// Do not use registries (deprecated, use --no-use-registries)
+  #[arg(long, alias = "no-registries")]
   pub no_registries: bool,
 
   /// Commit the lock file after updates
@@ -864,8 +869,12 @@ impl NixBuildPassthroughArgs {
     if self.no_write_lock_file {
       args.push("--no-write-lock-file".into());
     }
+    if self.no_use_registries {
+      args.push("--no-use-registries".into());
+    }
     if self.no_registries {
-      args.push("--no-registries".into());
+      warn!("--no-registries is deprecated, use --no-use-registries instead");
+      args.push("--no-use-registries".into());
     }
     if self.commit_lock_file {
       args.push("--commit-lock-file".into());
