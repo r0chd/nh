@@ -345,6 +345,17 @@ fn get_ssh_opts() -> Vec<String> {
   if let Ok(sshopts) = env::var("NIX_SSHOPTS") {
     if let Some(parsed) = shlex::split(&sshopts) {
       opts.extend(parsed);
+    } else {
+      let truncated = sshopts.chars().take(60).collect::<String>();
+      let sshopts_display = if sshopts.len() > 60 {
+        format!("{truncated}...",)
+      } else {
+        truncated
+      };
+      warn!(
+        "Failed to parse NIX_SSHOPTS, ignoring. Provide valid shell-quoted \
+         options or use ~/.ssh/config. Value: {sshopts_display}",
+      );
     }
   }
 

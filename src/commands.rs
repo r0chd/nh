@@ -301,7 +301,7 @@ impl Command {
     if self.elevate.is_some() && cfg!(target_os = "macos") {
       self
         .env_vars
-        .insert("HOME".to_string(), EnvAction::Set("".to_string()));
+        .insert("HOME".to_string(), EnvAction::Set(String::new()));
     }
 
     // Preserve all variables in PRESERVE_ENV if present

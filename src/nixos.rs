@@ -207,18 +207,38 @@ impl OsRebuildActivateArgs {
       }
     }
 
-    // Validate system closure before activation
-    if let Some(target_host) = &self.rebuild.target_host {
-      // For remote activation, validate on the remote host
-      validate_system_closure_remote(target_profile, target_host)?;
+    // Validate system closure before activation (unless bypassed)
+    // Resolve target_profile to actual store path for validation and activation
+    let resolved_profile = target_profile
+      .canonicalize()
+      .context("Failed to resolve output path to actual store path")?;
+
+    let should_skip =
+      self.rebuild.no_validate || std::env::var("NH_NO_VALIDATE").is_ok();
+
+    if should_skip {
+      warn!(
+        "Skipping pre-activation validation (--no-validate or NH_NO_VALIDATE \
+         set)"
+      );
+      warn!(
+        "This may result in activation failures if the system closure is \
+         incomplete"
+      );
+    } else if let Some(target_host) = &self.rebuild.target_host {
+      // For remote activation, validate on the remote host using the resolved
+      // store path
+      validate_system_closure_remote(
+        &resolved_profile,
+        target_host,
+        self.rebuild.build_host.as_deref(),
+      )?;
     } else {
       // For local activation, validate locally
-      validate_system_closure(target_profile)?;
+      validate_system_closure(&resolved_profile)?;
     }
 
-    let switch_to_configuration = target_profile
-      .canonicalize()
-      .context("Failed to resolve output path")?
+    let switch_to_configuration = resolved_profile
       .join("bin")
       .join("switch-to-configuration")
       .canonicalize()
@@ -817,7 +837,7 @@ fn run_vm(out_path: &Path) -> Result<()> {
 
 /// Validates that essential files exist in the system closure.
 ///
-/// Checks for  few critical files that must be present in a complete NixOS
+/// Checks for a few critical files that must be present in a complete NixOS
 /// system. This is essentially in-line with what nixos-rebuild-ng checks for.
 ///
 /// - bin/switch-to-configuration: activation script
@@ -868,6 +888,7 @@ fn validate_system_closure(system_path: &Path) -> Result<()> {
 fn validate_system_closure_remote(
   system_path: &Path,
   target_host: &str,
+  build_host: Option<&str>,
 ) -> Result<()> {
   let essential_files = [
     ("bin/switch-to-configuration", "activation script"),
@@ -911,16 +932,32 @@ fn validate_system_closure_remote(
 
   if !missing.is_empty() {
     let missing_list = missing.join("\n");
+
+    // Build context-aware error message
+    let host_context = build_host.map_or_else(
+      || format!("on target host '{target_host}'"),
+      |build| {
+        if build == target_host {
+          format!("on target host '{target_host}' (also build host)")
+        } else {
+          format!("on target host '{target_host}' (built on '{build}')")
+        }
+      },
+    );
+
     return Err(eyre!(
-      "System closure validation failed on remote host {}. Missing essential \
-       files:\n{}\n\nThis typically happens when:\n1. 'system.switch.enable' \
-       is set to false in your configuration\n2. The build was incomplete or \
-       corrupted\n3. You're using an incomplete derivation\n\nTo fix \
-       this:\n1. Check if 'system.switch.enable = false' is set and remove \
-       it\n2. Rebuild your system configuration\n3. If the problem persists, \
-       verify your system closure is complete\n\nSystem path checked: {}",
-      target_host,
+      "System closure validation failed {}.\n\nMissing essential files in \
+       store path '{}':\n{}\n\nThis typically happens when:\n1. \
+       'system.switch.enable' is set to false in your configuration\n2. The \
+       build was incomplete or corrupted\n3. The Nix store path was not fully \
+       copied to the target host\n\nTo fix this:\n1. Check if \
+       'system.switch.enable = false' is set and remove it\n2. Ensure the \
+       complete system closure was copied: nix copy --to ssh://{} {}\n3. \
+       Rebuild your system configuration if the problem persists",
+      host_context,
+      system_path.display(),
       missing_list,
+      target_host,
       system_path.display()
     ));
   }

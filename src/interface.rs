@@ -239,6 +239,10 @@ pub struct OsRebuildArgs {
   /// Build the configuration to a different host over ssh
   #[arg(long)]
   pub build_host: Option<String>,
+
+  /// Skip pre-activation system validation checks
+  #[arg(long)]
+  pub no_validate: bool,
 }
 
 #[derive(Debug, Args)]
