@@ -897,72 +897,26 @@ fn validate_system_closure_remote(
     ("sw/bin", "system path"),
   ];
 
-  let mut missing = Vec::new();
-  for (file, description) in &essential_files {
-    let remote_path = system_path.join(file);
-    let path_str = remote_path.to_str().ok_or_else(|| {
-      eyre!("System path is not valid UTF-8: {}", remote_path.display())
-    })?;
+  // Parse the target host
+  let target = remote::RemoteHost::parse(target_host)
+    .wrap_err("Invalid target host specification")?;
 
-    // Use SSH to test if file exists on remote host. We need to quote the path
-    // to prevent shell interpretation of special characters, such as the ones
-    // in `.drv^*`.
-    let quoted_path = shlex::try_quote(path_str).map_err(|_| {
-      eyre!("Failed to quote path for shell: {}", remote_path.display())
-    })?;
-
-    let check_result = std::process::Command::new("ssh")
-      .args([target_host, "test", "-e", &quoted_path])
-      .output();
-
-    match check_result {
-      Ok(output) if !output.status.success() => {
-        missing.push(format!("  - {file} ({description})"));
-      },
-      Err(e) => {
-        return Err(eyre!(
-          "Failed to check file existence on remote host {}: {}",
-          target_host,
-          e
-        ));
-      },
-      _ => {}, // File exists
+  // Build context string for error messages
+  let context = build_host.map(|build| {
+    if build == target_host {
+      "also build host".to_string()
+    } else {
+      format!("built on '{build}'")
     }
-  }
+  });
 
-  if !missing.is_empty() {
-    let missing_list = missing.join("\n");
-
-    // Build context-aware error message
-    let host_context = build_host.map_or_else(
-      || format!("on target host '{target_host}'"),
-      |build| {
-        if build == target_host {
-          format!("on target host '{target_host}' (also build host)")
-        } else {
-          format!("on target host '{target_host}' (built on '{build}')")
-        }
-      },
-    );
-
-    return Err(eyre!(
-      "System closure validation failed {}.\n\nMissing essential files in \
-       store path '{}':\n{}\n\nThis typically happens when:\n1. \
-       'system.switch.enable' is set to false in your configuration\n2. The \
-       build was incomplete or corrupted\n3. The Nix store path was not fully \
-       copied to the target host\n\nTo fix this:\n1. Check if \
-       'system.switch.enable = false' is set and remove it\n2. Ensure the \
-       complete system closure was copied: nix copy --to ssh://{} {}\n3. \
-       Rebuild your system configuration if the problem persists",
-      host_context,
-      system_path.display(),
-      missing_list,
-      target_host,
-      system_path.display()
-    ));
-  }
-
-  Ok(())
+  // Delegate to the generic remote validation function
+  remote::validate_closure_remote(
+    &target,
+    system_path,
+    &essential_files,
+    context.as_deref(),
+  )
 }
 
 /// Returns an error indicating that the 'switch-to-configuration' binary is

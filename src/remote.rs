@@ -2,7 +2,7 @@ use std::{
   env,
   ffi::OsString,
   io::Read,
-  path::PathBuf,
+  path::{Path, PathBuf},
   sync::{
     Arc,
     OnceLock,
@@ -337,8 +337,10 @@ fn shell_quote(s: &str) -> String {
   )
 }
 
-/// Get SSH options from `NIX_SSHOPTS` plus our defaults.
-fn get_ssh_opts() -> Vec<String> {
+/// Get SSH options from `NIX_SSHOPTS` plus our defaults. This includes
+/// connection multiplexing options (`ControlMaster`, `ControlPath`,
+/// `ControlPersist`) which enable efficient reuse of SSH connections.
+pub fn get_ssh_opts() -> Vec<String> {
   let mut opts: Vec<String> = Vec::new();
 
   // User options first (from NIX_SSHOPTS)
@@ -353,8 +355,8 @@ fn get_ssh_opts() -> Vec<String> {
         truncated
       };
       warn!(
-        "Failed to parse NIX_SSHOPTS, ignoring. Provide valid shell-quoted \
-         options or use ~/.ssh/config. Value: {sshopts_display}",
+        "Failed to parse NIX_SSHOPTS, ignoring. Provide valid options or use \
+         ~/.ssh/config. Value: {sshopts_display}",
       );
     }
   }
@@ -498,13 +500,139 @@ fn copy_closure_to(
   Ok(())
 }
 
+/// Validates that essential files exist in a closure on a remote host.
+///
+/// Performs batched SSH checks using connection multiplexing. This is useful
+/// for validating that a system closure contains all necessary files before
+/// attempting activation.
+///
+/// # Arguments
+///
+/// * `host` - The remote host to check files on
+/// * `closure_path` - The base path to the closure (e.g.,
+///   `/nix/store/xxx-nixos-system`)
+/// * `essential_files` - Slice of (`relative_path`, `description`) tuples for
+///   files to validate
+/// * `context_info` - Optional context for error messages (e.g., "built on
+///   'host1'")
+///
+/// # Returns
+///
+/// Returns `Ok(())` if all files exist, or an error describing which files are
+/// missing.
+///
+/// # Errors
+///
+/// Returns an error if:
+///
+/// - SSH connection to the remote host fails
+/// - Any of the essential files are missing
+/// - Path strings contain invalid UTF-8
+pub fn validate_closure_remote(
+  host: &RemoteHost,
+  closure_path: &Path,
+  essential_files: &[(&str, &str)],
+  context_info: Option<&str>,
+) -> Result<()> {
+  // Build all test commands for batched execution
+  let test_commands: Vec<String> = essential_files
+    .iter()
+    .map(|(file, _)| {
+      let remote_path = closure_path.join(file);
+      let path_str = remote_path.to_str().ok_or_else(|| {
+        eyre!("Path is not valid UTF-8: {}", remote_path.display())
+      })?;
+      let quoted_path = shlex::try_quote(path_str).map_err(|_| {
+        eyre!("Failed to quote path for shell: {}", remote_path.display())
+      })?;
+      Ok(format!("test -e {quoted_path}"))
+    })
+    .collect::<Result<Vec<_>>>()?;
+
+  // Join all tests with &&, so the command fails on first missing file
+  // We check each file individually afterward to identify which ones are
+  // missing
+  let batch_command = test_commands.join(" && ");
+
+  // Get SSH options for connection multiplexing
+  let ssh_opts = get_ssh_opts();
+
+  // Execute batch check using SSH with proper connection multiplexing
+  let check_result = std::process::Command::new("ssh")
+    .args(&ssh_opts)
+    .arg(host.host())
+    .arg(&batch_command)
+    .output();
+
+  // If batch check succeeds, all files exist
+  if let Ok(output) = &check_result {
+    if output.status.success() {
+      return Ok(());
+    }
+  }
+
+  // Batch check failed or errored. Identify which files are missing
+  let mut missing = Vec::new();
+  for ((file, description), test_cmd) in
+    essential_files.iter().zip(&test_commands)
+  {
+    let check_result = std::process::Command::new("ssh")
+      .args(&ssh_opts)
+      .arg(host.host())
+      .arg(test_cmd)
+      .output();
+
+    match check_result {
+      Ok(output) if !output.status.success() => {
+        missing.push(format!("  - {file} ({description})"));
+      },
+      Err(e) => {
+        return Err(eyre!(
+          "Failed to check file existence on remote host {}: {}",
+          host,
+          e
+        ));
+      },
+      _ => {}, // File exists
+    }
+  }
+
+  if !missing.is_empty() {
+    let missing_list = missing.join("\n");
+
+    // Build context-aware error message
+    let host_context = context_info.map_or_else(
+      || format!("on remote host '{host}'"),
+      |ctx| format!("on remote host '{host}' ({ctx})"),
+    );
+
+    return Err(eyre!(
+      "Closure validation failed {}.\n\nMissing essential files in store path \
+       '{}':\n{}\n\nThis typically happens when:\n1. Required system \
+       components are disabled in your configuration\n2. The build was \
+       incomplete or corrupted\n3. The Nix store path was not fully copied to \
+       the target host\n\nTo fix this:\n1. Verify your configuration enables \
+       all required components\n2. Ensure the complete closure was copied: \
+       nix copy --to ssh://{} {}\n3. Rebuild your configuration if the \
+       problem persists",
+      host_context,
+      closure_path.display(),
+      missing_list,
+      host,
+      closure_path.display()
+    ));
+  }
+
+  Ok(())
+}
+
 /// Copy a Nix closure from a remote host to localhost.
 fn copy_closure_from(
   host: &RemoteHost,
   path: &str,
   use_substitutes: bool,
 ) -> Result<()> {
-  info!("Copying result from build host '{}'", host);
+  info!("Copying result from build host '{host}'");
 
   let mut cmd = Exec::cmd("nix-copy-closure").arg("--from").arg(host.host());
 
