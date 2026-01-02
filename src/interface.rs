@@ -233,11 +233,11 @@ pub struct OsRebuildArgs {
   #[arg(short = 'R', long, env = "NH_BYPASS_ROOT_CHECK")]
   pub bypass_root_check: bool,
 
-  /// Deploy the configuration to a different host over ssh
+  /// Deploy the built configuration to a different host over SSH
   #[arg(long)]
   pub target_host: Option<String>,
 
-  /// Build the configuration to a different host over ssh
+  /// Build the configuration on a different host over SSH
   #[arg(long)]
   pub build_host: Option<String>,
 
