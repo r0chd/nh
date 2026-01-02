@@ -16,7 +16,7 @@ use color_eyre::{
   eyre::{Context, bail, eyre},
 };
 use subprocess::{Exec, ExitStatus, Redirection};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{installable::Installable, util::NixVariant};
 
@@ -168,19 +168,53 @@ fn get_ssh_control_dir() -> &'static PathBuf {
     let control_dir = base.join(format!("nh-ssh-{}", std::process::id()));
 
     // Create the directory if it doesn't exist
-    if let Err(e) = std::fs::create_dir_all(&control_dir) {
+    if let Err(e1) = std::fs::create_dir_all(&control_dir) {
       debug!(
-        "Failed to create SSH control directory at {}: {e}",
+        "Failed to create SSH control directory at {}: {e1}",
         control_dir.display()
       );
+
       // Fall back to /tmp/nh-ssh-<pid> - try creating there instead
       let fallback_dir =
         PathBuf::from("/tmp").join(format!("nh-ssh-{}", std::process::id()));
+
+      // As a last resort, if *all else* fails, we construct a unique
+      // subdirectory under /tmp with PID and full timestamp to preserve
+      // process isolation and avoid collisions between concurrent invocations
       if let Err(e2) = std::fs::create_dir_all(&fallback_dir) {
-        // Last resort: use /tmp directly (socket will be /tmp/ssh-%n)
-        // This is not ideal but better than failing entirely
-        debug!("Failed to create fallback SSH control directory: {e2}");
-        return PathBuf::from("/tmp");
+        let timestamp = std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .map_or(0, |d| {
+            d.as_secs() * 1_000_000_000 + u64::from(d.subsec_nanos())
+          });
+
+        let unique_dir = PathBuf::from("/tmp").join(format!(
+          "nh-ssh-{}-{}",
+          std::process::id(),
+          timestamp
+        ));
+
+        if let Err(e3) = std::fs::create_dir_all(&unique_dir) {
+          error!(
+            "Failed to create SSH control directory after exhausting all \
+             fallbacks. Errors: (1) {}: {e1}, (2) {}: {e2}, (3) {}: {e3}. SSH \
+             operations will likely fail.",
+            control_dir.display(),
+            fallback_dir.display(),
+            unique_dir.display()
+          );
+
+          // Return the path anyway; SSH will fail with a clear error if
+          // directory creation is truly impossible, and at this point we
+          // are out of options.
+          return unique_dir;
+        }
+
+        debug!(
+          "Created unique SSH control directory: {}",
+          unique_dir.display()
+        );
+        return unique_dir;
       }
       return fallback_dir;
     }
@@ -302,6 +336,43 @@ impl RemoteHost {
   #[must_use]
   pub fn host(&self) -> &str {
     &self.host
+  }
+
+  /// Get the SSH-compatible host string.
+  ///
+  /// Strips brackets from IPv6 addresses since SSH doesn't accept them.
+  /// Preserves zone IDs (`%eth0`) and `user@` prefix if present.
+  ///
+  /// Examples:
+  ///
+  /// - `[2001:db8::1]` -> `2001:db8::1`
+  /// - `user@[2001:db8::1]` -> `user@2001:db8::1`
+  /// - `[fe80::1%eth0]` -> `fe80::1%eth0`
+  /// - `host.example` -> `host.example`
+  #[must_use]
+  pub fn ssh_host(&self) -> String {
+    let hostname = self.hostname();
+
+    // Check for bracketed IPv6 address
+    if hostname.starts_with('[') && hostname.ends_with(']') {
+      let inner = &hostname[1..hostname.len() - 1];
+
+      // Validate it's actually a valid IPv6 address
+      // Split on '%' to validate only the address part (zone ID is
+      // SSH-specific)
+      let addr_part = inner.split('%').next().unwrap_or(inner);
+      if addr_part.parse::<std::net::Ipv6Addr>().is_ok() {
+        // Reconstruct with user@ prefix if present
+        if let Some(at_pos) = self.host.find('@') {
+          let user = &self.host[..at_pos];
+          return format!("{user}@{inner}");
+        }
+        return inner.to_string();
+      }
+    }
+
+    // Not IPv6 or not bracketed, return as-is
+    self.host.clone()
   }
 }
 
@@ -425,12 +496,12 @@ fn attempt_remote_cleanup(host: &RemoteHost, remote_cmd: &str) {
   // pkill -INT --full '<quoted_cmd>' will match the exact command line
   let pkill_cmd = format!("pkill -INT --full {quoted_cmd}");
 
-  // Build SSH command with the pkill command
-  let mut ssh_cmd = Exec::cmd("ssh");
+  // Build SSH command with stderr capture for diagnostics
+  let mut ssh_cmd = Exec::cmd("ssh").stderr(Redirection::Pipe);
   for opt in &ssh_opts {
     ssh_cmd = ssh_cmd.arg(opt);
   }
-  ssh_cmd = ssh_cmd.arg(host.host()).arg(&pkill_cmd);
+  ssh_cmd = ssh_cmd.arg(host.ssh_host()).arg(&pkill_cmd);
 
   debug!("Attempting remote cleanup on '{host}': pkill -INT --full <command>");
 
@@ -551,7 +622,7 @@ fn run_remote_command(
   for opt in &ssh_opts {
     cmd = cmd.arg(opt);
   }
-  cmd = cmd.arg(host.host()).arg(&remote_cmd);
+  cmd = cmd.arg(host.ssh_host()).arg(&remote_cmd);
 
   if capture_stdout {
     cmd = cmd.stdout(Redirection::Pipe).stderr(Redirection::Pipe);
@@ -586,7 +657,9 @@ fn copy_closure_to(
 ) -> Result<()> {
   info!("Copying closure to build host '{}'", host);
 
-  let mut cmd = Exec::cmd("nix-copy-closure").arg("--to").arg(host.host());
+  let mut cmd = Exec::cmd("nix-copy-closure")
+    .arg("--to")
+    .arg(host.ssh_host());
 
   if use_substitutes {
     cmd = cmd.arg("--use-substitutes");
@@ -671,7 +744,7 @@ pub fn validate_closure_remote(
   // Execute batch check using SSH with proper connection multiplexing
   let check_result = std::process::Command::new("ssh")
     .args(&ssh_opts)
-    .arg(host.host())
+    .arg(host.ssh_host())
     .arg(&batch_command)
     .output();
 
@@ -689,7 +762,7 @@ pub fn validate_closure_remote(
   {
     let check_result = std::process::Command::new("ssh")
       .args(&ssh_opts)
-      .arg(host.host())
+      .arg(host.ssh_host())
       .arg(test_cmd)
       .output();
 
@@ -745,7 +818,9 @@ fn copy_closure_from(
 ) -> Result<()> {
   info!("Copying result from build host '{host}'");
 
-  let mut cmd = Exec::cmd("nix-copy-closure").arg("--from").arg(host.host());
+  let mut cmd = Exec::cmd("nix-copy-closure")
+    .arg("--from")
+    .arg(host.ssh_host());
 
   if use_substitutes {
     cmd = cmd.arg("--use-substitutes");
@@ -784,9 +859,9 @@ fn copy_closure_between_remotes(
   let mut cmd = Exec::cmd("nix")
     .args(&flake_flags)
     .args(&["copy", "--from"])
-    .arg(format!("ssh://{}", from_host.host()))
+    .arg(format!("ssh://{}", from_host.ssh_host()))
     .arg("--to")
-    .arg(format!("ssh://{}", to_host.host()));
+    .arg(format!("ssh://{}", to_host.ssh_host()));
 
   if use_substitutes {
     cmd = cmd.arg("--substitute-on-destination");
@@ -1102,7 +1177,7 @@ fn build_on_remote_simple(
     ssh_cmd = ssh_cmd.arg(opt);
   }
   ssh_cmd = ssh_cmd
-    .arg(&host.host)
+    .arg(host.ssh_host())
     .arg(&remote_cmd)
     .stdout(Redirection::Pipe)
     .stderr(Redirection::Pipe);
@@ -1198,7 +1273,7 @@ fn build_on_remote_with_nom(
     ssh_cmd = ssh_cmd.arg(opt);
   }
   ssh_cmd = ssh_cmd
-    .arg(host.host())
+    .arg(host.ssh_host())
     .arg(&remote_cmd)
     .stdout(Redirection::Pipe)
     .stderr(Redirection::Merge);
@@ -1503,6 +1578,72 @@ mod tests {
   }
 
   #[test]
+  fn test_parse_ipv6_at_inside_brackets_rejected() {
+    // @ character inside brackets should be rejected (not valid IPv6)
+    // This ensures [@2001:db8::1] and [2001@db8::1] are both rejected
+    let result = RemoteHost::parse("[@2001:db8::1]");
+    assert!(result.is_err(), "[@2001:db8::1] should be rejected");
+
+    let result2 = RemoteHost::parse("[2001@db8::1]");
+    assert!(result2.is_err(), "[2001@db8::1] should be rejected");
+  }
+
+  #[test]
+  fn test_ssh_host_ipv6_strips_brackets() {
+    let host = RemoteHost::parse("[2001:db8::1]").expect("should parse IPv6");
+    assert_eq!(host.ssh_host(), "2001:db8::1");
+  }
+
+  #[test]
+  fn test_ssh_host_ipv6_with_user() {
+    let host = RemoteHost::parse("user@[2001:db8::1]").expect("should parse");
+    assert_eq!(host.ssh_host(), "user@2001:db8::1");
+  }
+
+  #[test]
+  fn test_ssh_host_ipv6_with_zone_id() {
+    let host = RemoteHost::parse("[fe80::1%eth0]").expect("should parse");
+    assert_eq!(host.ssh_host(), "fe80::1%eth0");
+  }
+
+  #[test]
+  fn test_ssh_host_ipv6_with_zone_id_and_user() {
+    let host = RemoteHost::parse("user@[fe80::1%eth0]").expect("should parse");
+    assert_eq!(host.ssh_host(), "user@fe80::1%eth0");
+  }
+
+  #[test]
+  fn test_ssh_host_ipv6_localhost() {
+    let host = RemoteHost::parse("[::1]").expect("should parse");
+    assert_eq!(host.ssh_host(), "::1");
+  }
+
+  #[test]
+  fn test_ssh_host_non_ipv6_unchanged() {
+    let host = RemoteHost::parse("host.example").expect("should parse");
+    assert_eq!(host.ssh_host(), "host.example");
+  }
+
+  #[test]
+  fn test_ssh_host_non_ipv6_with_user() {
+    let host = RemoteHost::parse("user@host.example").expect("should parse");
+    assert_eq!(host.ssh_host(), "user@host.example");
+  }
+
+  #[test]
+  fn test_ssh_host_ssh_uri_ipv6() {
+    let host = RemoteHost::parse("ssh://[2001:db8::1]").expect("should parse");
+    assert_eq!(host.ssh_host(), "2001:db8::1");
+  }
+
+  #[test]
+  fn test_ssh_host_ssh_uri_ipv6_with_user() {
+    let host =
+      RemoteHost::parse("ssh://root@[2001:db8::1]").expect("should parse");
+    assert_eq!(host.ssh_host(), "root@2001:db8::1");
+  }
+
+  #[test]
   fn test_shell_quote_simple() {
     assert_eq!(shell_quote("simple"), "simple");
     assert_eq!(
@@ -1735,19 +1876,21 @@ mod tests {
   #[test]
   fn test_get_ssh_control_dir_creates_directory() {
     let dir = get_ssh_control_dir();
-    // The directory should exist (or be /tmp as last resort)
+    // The directory should exist in normal operation. In extreme edge cases
+    // (read-only /tmp), the function returns a path that may not exist, and
+    // SSH will fail with a clear error when attempting to use it.
     assert!(
-      dir.exists() || dir == &PathBuf::from("/tmp"),
-      "Control dir should exist or be /tmp fallback"
+      dir.exists(),
+      "Control dir should exist in normal operation: {}",
+      dir.display()
     );
-    // Should contain our process-specific suffix (unless /tmp fallback)
+
+    // Should contain our process-specific suffix
     let dir_str = dir.to_string_lossy();
-    if dir_str != "/tmp" {
-      assert!(
-        dir_str.contains("nh-ssh-"),
-        "Control dir should contain 'nh-ssh-': {dir_str}"
-      );
-    }
+    assert!(
+      dir_str.contains("nh-ssh-"),
+      "Control dir should contain 'nh-ssh-': {dir_str}"
+    );
   }
 
   #[test]
