@@ -238,7 +238,14 @@ pub struct RemoteHost {
 }
 
 impl RemoteHost {
-  /// Get the hostname part (without user@ prefix).
+  /// Get the hostname part without the `user@` prefix.
+  ///
+  /// Used for hostname comparisons when determining if two `RemoteHost`
+  /// instances refer to the same physical host (e.g., detecting when
+  /// build_host == target_host regardless of different user credentials).
+  ///
+  /// Returns the bracketed IPv6 address as-is if present (e.g.,
+  /// `[2001:db8::1]`).
   ///
   /// # Panics
   ///
@@ -330,12 +337,6 @@ impl RemoteHost {
     Ok(Self {
       host: host.to_string(),
     })
-  }
-
-  /// Get the host string for use with nix-copy-closure and SSH.
-  #[must_use]
-  pub fn host(&self) -> &str {
-    &self.host
   }
 
   /// Get the SSH-compatible host string.
@@ -1436,39 +1437,39 @@ mod tests {
   #[test]
   fn test_parse_bare_hostname() {
     let host = RemoteHost::parse("buildserver").expect("should parse");
-    assert_eq!(host.host(), "buildserver");
+    assert_eq!(host.to_string(), "buildserver");
   }
 
   #[test]
   fn test_parse_user_at_hostname() {
     let host = RemoteHost::parse("root@buildserver").expect("should parse");
-    assert_eq!(host.host(), "root@buildserver");
+    assert_eq!(host.to_string(), "root@buildserver");
   }
 
   #[test]
   fn test_parse_ssh_uri_stripped() {
     let host = RemoteHost::parse("ssh://buildserver").expect("should parse");
-    assert_eq!(host.host(), "buildserver");
+    assert_eq!(host.to_string(), "buildserver");
   }
 
   #[test]
   fn test_parse_ssh_ng_uri_stripped() {
     let host = RemoteHost::parse("ssh-ng://buildserver").expect("should parse");
-    assert_eq!(host.host(), "buildserver");
+    assert_eq!(host.to_string(), "buildserver");
   }
 
   #[test]
   fn test_parse_ssh_uri_with_user() {
     let host =
       RemoteHost::parse("ssh://root@buildserver").expect("should parse");
-    assert_eq!(host.host(), "root@buildserver");
+    assert_eq!(host.to_string(), "root@buildserver");
   }
 
   #[test]
   fn test_parse_ssh_ng_uri_with_user() {
     let host =
       RemoteHost::parse("ssh-ng://admin@buildserver").expect("should parse");
-    assert_eq!(host.host(), "admin@buildserver");
+    assert_eq!(host.to_string(), "admin@buildserver");
   }
 
   #[test]
@@ -1497,7 +1498,7 @@ mod tests {
   #[test]
   fn test_parse_ipv6_bracketed() {
     let host = RemoteHost::parse("[2001:db8::1]").expect("should parse IPv6");
-    assert_eq!(host.host(), "[2001:db8::1]");
+    assert_eq!(host.to_string(), "[2001:db8::1]");
     assert_eq!(host.hostname(), "[2001:db8::1]");
   }
 
@@ -1505,7 +1506,7 @@ mod tests {
   fn test_parse_ipv6_with_user() {
     let host = RemoteHost::parse("root@[2001:db8::1]")
       .expect("should parse IPv6 with user");
-    assert_eq!(host.host(), "root@[2001:db8::1]");
+    assert_eq!(host.to_string(), "root@[2001:db8::1]");
     assert_eq!(host.hostname(), "[2001:db8::1]");
   }
 
@@ -1513,34 +1514,34 @@ mod tests {
   fn test_parse_ipv6_with_zone_id() {
     let host =
       RemoteHost::parse("[fe80::1%eth0]").expect("should parse IPv6 with zone");
-    assert_eq!(host.host(), "[fe80::1%eth0]");
+    assert_eq!(host.to_string(), "[fe80::1%eth0]");
   }
 
   #[test]
   fn test_parse_ipv6_ssh_uri() {
     let host = RemoteHost::parse("ssh://[2001:db8::1]")
       .expect("should parse IPv6 SSH URI");
-    assert_eq!(host.host(), "[2001:db8::1]");
+    assert_eq!(host.to_string(), "[2001:db8::1]");
   }
 
   #[test]
   fn test_parse_ipv6_ssh_uri_with_user() {
     let host = RemoteHost::parse("ssh://root@[2001:db8::1]")
       .expect("should parse IPv6 SSH URI with user");
-    assert_eq!(host.host(), "root@[2001:db8::1]");
+    assert_eq!(host.to_string(), "root@[2001:db8::1]");
   }
 
   #[test]
   fn test_parse_ipv6_localhost() {
     let host = RemoteHost::parse("[::1]").expect("should parse IPv6 localhost");
-    assert_eq!(host.host(), "[::1]");
+    assert_eq!(host.to_string(), "[::1]");
   }
 
   #[test]
   fn test_parse_ipv6_compressed() {
     let host =
       RemoteHost::parse("[2001:db8::]").expect("should parse compressed IPv6");
-    assert_eq!(host.host(), "[2001:db8::]");
+    assert_eq!(host.to_string(), "[2001:db8::]");
   }
 
   #[test]
