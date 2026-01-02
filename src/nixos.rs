@@ -207,11 +207,19 @@ impl OsRebuildActivateArgs {
       }
     }
 
-    // Validate system closure before activation (unless bypassed)
-    // Resolve target_profile to actual store path for validation and activation
-    let resolved_profile = target_profile
-      .canonicalize()
-      .context("Failed to resolve output path to actual store path")?;
+    // Validate system closure before activation, unless bypassed. For remote
+    // builds where `out_path` doesn't exist locally, we can't canonicalize
+    // `target_profile`. Instead we use the path as-is for remote operations.
+    let is_remote_build = self.rebuild.target_host.is_some();
+    let resolved_profile: PathBuf = if is_remote_build && !out_path.exists() {
+      // Remote build with no local result. Skip canonicalization, use original
+      // path
+      target_profile.to_path_buf()
+    } else {
+      target_profile
+        .canonicalize()
+        .context("Failed to resolve output path to actual store path")?
+    };
 
     let should_skip =
       self.rebuild.no_validate || std::env::var("NH_NO_VALIDATE").is_ok();
@@ -238,11 +246,20 @@ impl OsRebuildActivateArgs {
       validate_system_closure(&resolved_profile)?;
     }
 
-    let switch_to_configuration = resolved_profile
-      .join("bin")
-      .join("switch-to-configuration")
-      .canonicalize()
-      .context("Failed to resolve switch-to-configuration path")?;
+    // Resolve switch-to-configuration path for activation commands. For
+    // remote-only builds where out_path doesn't exist locally, skip this
+    // since we'll execute these commands via SSH on the remote host
+    let switch_to_configuration_path =
+      resolved_profile.join("bin").join("switch-to-configuration");
+
+    let switch_to_configuration = if is_remote_build && !out_path.exists() {
+      // Remote build with no local result. Use uncanonicalized path for SSH
+      switch_to_configuration_path
+    } else {
+      switch_to_configuration_path
+        .canonicalize()
+        .context("Failed to resolve switch-to-configuration path")?
+    };
 
     let canonical_out_path =
       switch_to_configuration.to_str().ok_or_else(|| {
