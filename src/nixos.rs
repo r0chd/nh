@@ -221,8 +221,7 @@ impl OsRebuildActivateArgs {
         .context("Failed to resolve output path to actual store path")?
     };
 
-    let should_skip =
-      self.rebuild.no_validate || std::env::var("NH_NO_VALIDATE").is_ok();
+    let should_skip = self.rebuild.no_validate;
 
     if should_skip {
       warn!(

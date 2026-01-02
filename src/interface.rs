@@ -200,6 +200,7 @@ pub struct OsBuildVmArgs {
 }
 
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OsRebuildArgs {
   #[command(flatten)]
   pub common: CommonRebuildArgs,
@@ -241,7 +242,7 @@ pub struct OsRebuildArgs {
   pub build_host: Option<String>,
 
   /// Skip pre-activation system validation checks
-  #[arg(long)]
+  #[arg(long, env = "NH_NO_VALIDATE")]
   pub no_validate: bool,
 }
 
