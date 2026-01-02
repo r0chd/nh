@@ -52,6 +52,11 @@ functionality, under the "Removed" section.
 
 ### Fixed
 
+- `nh os info` now gracefully handles out-of-sync profiles. When a previous
+  switch failed during activation (e.g., a Systemd service failed), the profile
+  may be out of sync with `/run/current-system` while in "test mode" via
+  `switch-to-configuration test`. NH now warns about this condition and displays
+  version info from the running system instead of failing with an error.
 - Fixed the whitespace splitting of self-elevated commands so spaces inside
   quotes don't get separated.
 - Missing or "invalid" installable references are now handled more gracefully.
