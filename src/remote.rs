@@ -388,6 +388,117 @@ fn get_nix_sshopts_env() -> String {
   }
 }
 
+/// Check if remote cleanup is enabled via environment variable.
+///
+/// Returns `true` if `NH_REMOTE_CLEANUP` is set to a truthy value:
+/// "1", "true", "yes" (case-insensitive).
+///
+/// Returns `false` if unset, empty, or set to any other value.
+fn should_cleanup_remote() -> bool {
+  env::var("NH_REMOTE_CLEANUP").is_ok_and(|val| {
+    let val = val.trim().to_lowercase();
+    val == "1" || val == "true" || val == "yes"
+  })
+}
+
+/// Attempt to clean up a remote process using pkill.
+///
+/// This is a best-effort (and opt-in) operation called when the user interrupts
+/// a remote build. It tries to terminate the remote nix process via SSH and
+/// pkill, but is inherently fragile due to the nature of remote building
+/// semantics.
+///
+/// # Arguments
+///
+/// * `host` - The remote host where the process is running
+/// * `remote_cmd` - The original command that was run remotely, used for pkill
+///   matching
+fn attempt_remote_cleanup(host: &RemoteHost, remote_cmd: &str) {
+  if !should_cleanup_remote() {
+    return;
+  }
+
+  let ssh_opts = get_ssh_opts();
+  let quoted_cmd = shell_quote(remote_cmd); // for safe passing through pkill's --full argument
+
+  // Build the pkill command:
+  // pkill -INT --full '<quoted_cmd>' will match the exact command line
+  let pkill_cmd = format!("pkill -INT --full {quoted_cmd}");
+
+  // Build SSH command with the pkill command
+  let mut ssh_cmd = Exec::cmd("ssh");
+  for opt in &ssh_opts {
+    ssh_cmd = ssh_cmd.arg(opt);
+  }
+  ssh_cmd = ssh_cmd.arg(host.host()).arg(&pkill_cmd);
+
+  debug!("Attempting remote cleanup on '{host}': pkill -INT --full <command>");
+
+  // Use popen with timeout to avoid hanging on unresponsive hosts
+  let mut process = match ssh_cmd.popen() {
+    Ok(p) => p,
+    Err(e) => {
+      info!("Failed to execute remote cleanup on '{host}': {e}");
+      return;
+    },
+  };
+
+  // Wait up to 5 seconds for cleanup to complete
+  let timeout = Duration::from_secs(5);
+  match process.wait_timeout(timeout) {
+    Ok(Some(_)) => {
+      // Process exited, check status below
+    },
+    Ok(None) => {
+      // Timeout - kill the process and continue
+      let _ = process.kill();
+      let _ = process.wait();
+      info!("Remote cleanup on '{host}' timed out after 5 seconds");
+      return;
+    },
+    Err(e) => {
+      info!("Error waiting for remote cleanup on '{host}': {e}");
+      return;
+    },
+  }
+
+  // Check exit status
+  if let Some(exit_status) = process.exit_status() {
+    if exit_status.success() {
+      info!("Cleaned up remote process on '{}'", host);
+    } else {
+      // Capture stderr for error diagnosis
+      let stderr = process.stderr.take().map_or_else(String::new, |mut e| {
+        let mut s = String::new();
+        let _ = e.read_to_string(&mut s);
+        s
+      });
+      let stderr_lower = stderr.to_lowercase();
+
+      if stderr.contains("No matching processes")
+        || stderr_lower.contains("0 processes")
+      {
+        debug!(
+          "No matching process found on '{host}' during cleanup (may have \
+           already exited)"
+        );
+      } else if stderr_lower.contains("not found")
+        || stderr_lower.contains("command not found")
+      {
+        info!("pkill not available on '{}', skipping remote cleanup", host);
+      } else if stderr_lower.contains("permission denied")
+        || stderr_lower.contains("operation not permitted")
+      {
+        info!(
+          "Permission denied for pkill on '{host}', skipping remote cleanup",
+        );
+      } else {
+        info!("Remote cleanup on '{host}' returned non-zero exit status");
+      }
+    }
+  }
+}
+
 /// Get the flake experimental feature flags required for `nix` commands.
 ///
 /// Returns the flags needed for `--extra-experimental-features "nix-command
@@ -1007,8 +1118,13 @@ fn build_on_remote_simple(
         // Check interrupt flag while waiting
         if get_interrupt_flag().load(Ordering::Relaxed) {
           debug!("Interrupt detected, killing SSH process");
+
           let _ = process.kill();
-          let _ = process.wait(); // Reap zombie
+          let _ = process.wait(); // reap zombie
+
+          // Attempt remote cleanup if enabled
+          attempt_remote_cleanup(host, &remote_cmd);
+
           bail!("Operation interrupted by user");
         }
       },
@@ -1104,17 +1220,24 @@ fn build_on_remote_with_nom(
   let poll_interval = Duration::from_millis(100);
 
   for proc in &mut processes {
-    #[allow(clippy::needless_continue, reason = "Better for explicitness")]
+    #[allow(
+      clippy::needless_continue,
+      reason = "Better for explicitness and consistency"
+    )]
     loop {
       // Check interrupt flag before waiting
       if get_interrupt_flag().load(Ordering::Relaxed) {
         debug!("Interrupt detected during build with nom");
-        // Kill remaining local processes - this will cause SSH to terminate
+        // Kill remaining local processes. This will cause SSH to terminate
         // the remote command automatically
         for p in &mut processes {
           let _ = p.kill();
-          let _ = p.wait(); // Reap zombie
+          let _ = p.wait(); // reap zombie
         }
+
+        // Attempt remote cleanup if enabled
+        attempt_remote_cleanup(host, &remote_cmd);
+
         bail!("Operation interrupted by user");
       }
 
@@ -1646,5 +1769,67 @@ mod tests {
     let guard = init_ssh_control();
     drop(guard);
     // If this completes without panic, the Drop impl is at least safe
+  }
+
+  proptest! {
+    #[test]
+    #[serial]
+    fn test_should_cleanup_remote_enabled_by_valid_values(
+        value in prop_oneof![
+            Just("1"),
+            Just("true"),
+            Just("yes"),
+            Just("TRUE"),
+            Just("YES"),
+            Just("True"),
+        ]
+    ) {
+      unsafe {
+        std::env::set_var("NH_REMOTE_CLEANUP", value);
+      }
+      prop_assert!(should_cleanup_remote());
+      unsafe {
+        std::env::remove_var("NH_REMOTE_CLEANUP");
+      }
+    }
+  }
+
+  #[test]
+  #[serial]
+  fn test_should_cleanup_remote_empty_disabled() {
+    // Empty value should NOT enable cleanup
+    unsafe {
+      std::env::set_var("NH_REMOTE_CLEANUP", "");
+    }
+    assert!(!should_cleanup_remote());
+    unsafe {
+      std::env::remove_var("NH_REMOTE_CLEANUP");
+    }
+  }
+
+  #[test]
+  #[serial]
+  fn test_should_cleanup_remote_arbitrary_value_disabled() {
+    // Arbitrary values should NOT enable cleanup
+    unsafe {
+      std::env::set_var("NH_REMOTE_CLEANUP", "maybe");
+    }
+    assert!(!should_cleanup_remote());
+    unsafe {
+      std::env::remove_var("NH_REMOTE_CLEANUP");
+    }
+  }
+
+  #[test]
+  fn test_attempt_remote_cleanup_does_nothing_when_disabled() {
+    // When should_cleanup_remote returns false, no SSH command should be
+    // executed. We can't easily verify no SSH was spawned, but we can verify
+    // the function doesn't panic or error when cleanup is disabled
+    let host = RemoteHost::parse("user@host.example").unwrap();
+    let remote_cmd = "nix build /nix/store/abc.drv^* --print-out-paths";
+
+    // This should complete without error even when cleanup is disabled
+    attempt_remote_cleanup(&host, remote_cmd);
+    // If we reach here, the function handled the disabled case gracefully
   }
 }
