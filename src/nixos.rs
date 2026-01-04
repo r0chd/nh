@@ -34,6 +34,25 @@ const CURRENT_PROFILE: &str = "/run/current-system";
 const SPEC_LOCATION: &str = "/etc/specialisation";
 
 impl interface::OsArgs {
+  /// Executes the NixOS subcommand.
+  ///
+  /// # Parameters
+  ///
+  /// * `self` - The NixOS operation arguments
+  /// * `elevation` - The privilege elevation strategy (sudo/doas/none)
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(())` if the operation succeeds.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if:
+  ///
+  /// - Build or activation operations fail
+  /// - Remote operations encounter network or SSH issues
+  /// - Nix evaluation or building fails
+  /// - File system operations fail
   #[cfg_attr(feature = "hotpath", hotpath::measure)]
   pub fn run(self, elevation: ElevationStrategy) -> Result<()> {
     use OsRebuildVariant::{Boot, Build, Switch, Test};
@@ -189,21 +208,14 @@ impl OsRebuildActivateArgs {
       // Only copy if the output path exists locally (i.e., was copied back from
       // remote build)
       if out_path.exists() {
-        Command::new("nix")
-          .args([
-            "copy",
-            "--to",
-            format!("ssh://{target_host}").as_str(),
-            match target_profile.to_str() {
-              Some(s) => s,
-              None => {
-                return Err(eyre!("target_profile path is not valid UTF-8"));
-              },
-            },
-          ])
-          .message("Copying configuration to target")
-          .with_required_env()
-          .run()?;
+        let target = RemoteHost::parse(target_host)
+          .wrap_err("Invalid target host specification")?;
+        remote::copy_to_remote(
+          &target,
+          target_profile,
+          self.rebuild.common.passthrough.use_substitutes,
+        )
+        .context("Failed to copy configuration to target host")?;
       }
     }
 
@@ -266,52 +278,88 @@ impl OsRebuildActivateArgs {
       })?;
 
     if let Test | Switch = variant {
-      let variant_label = match variant {
-        Test => "test",
-        Switch => "switch",
-        #[allow(clippy::unreachable, reason = "Should never happen.")]
-        _ => unreachable!(),
-      };
+      if let Some(target_host) = &self.rebuild.target_host {
+        let target = RemoteHost::parse(target_host)
+          .wrap_err("Invalid target host specification")?;
 
-      Command::new(canonical_out_path)
-        .arg("test")
-        .ssh(self.rebuild.target_host.clone())
-        .message("Activating configuration")
-        .elevate(elevate.then_some(elevation.clone()))
-        .preserve_envs(["NIXOS_INSTALL_BOOTLOADER"])
-        .with_required_env()
-        .show_output(self.show_activation_logs)
-        .run()
-        .wrap_err(format!("Activation ({variant_label}) failed"))?;
+        let activation_type = match variant {
+          Test => remote::ActivationType::Test,
+          Switch => remote::ActivationType::Switch,
+          #[allow(clippy::unreachable, reason = "Should never happen.")]
+          _ => unreachable!(),
+        };
+
+        remote::activate_remote(
+          &target,
+          &resolved_profile,
+          &remote::ActivateRemoteConfig {
+            platform: remote::Platform::NixOS,
+            activation_type,
+            install_bootloader: false,
+            show_logs: self.show_activation_logs,
+            sudo: elevate,
+          },
+        )
+        .wrap_err(format!(
+          "Activation ({}) failed",
+          activation_type.as_str()
+        ))?;
+      } else {
+        Command::new(canonical_out_path)
+          .arg("test")
+          .message("Activating configuration")
+          .elevate(elevate.then_some(elevation.clone()))
+          .preserve_envs(["NIXOS_INSTALL_BOOTLOADER"])
+          .with_required_env()
+          .show_output(self.show_activation_logs)
+          .run()
+          .wrap_err("Activation (test) failed")?;
+      }
 
       debug!("Completed {variant:?} operation with output path: {out_path:?}");
     }
 
     if let Boot | Switch = variant {
-      Command::new("nix")
-        .elevate(elevate.then_some(elevation.clone()))
-        .args(["build", "--no-link", "--profile", SYSTEM_PROFILE])
-        .arg(canonical_out_path)
-        .ssh(self.rebuild.target_host.clone())
-        .with_required_env()
-        .run()
-        .wrap_err("Failed to set system profile")?;
+      if let Some(target_host) = &self.rebuild.target_host {
+        let target = RemoteHost::parse(target_host)
+          .wrap_err("Invalid target host specification")?;
 
-      let mut cmd = Command::new(switch_to_configuration)
-        .arg("boot")
-        .ssh(self.rebuild.target_host.clone())
-        .elevate(elevate.then_some(elevation))
-        .message("Adding configuration to bootloader")
-        .preserve_envs(["NIXOS_INSTALL_BOOTLOADER"]);
-
-      if self.rebuild.install_bootloader {
-        cmd = cmd.set_env("NIXOS_INSTALL_BOOTLOADER", "1");
-      }
-
-      cmd
-        .with_required_env()
-        .run()
+        remote::activate_remote(
+          &target,
+          &resolved_profile,
+          &remote::ActivateRemoteConfig {
+            platform:           remote::Platform::NixOS,
+            activation_type:    remote::ActivationType::Boot,
+            install_bootloader: self.rebuild.install_bootloader,
+            show_logs:          false,
+            sudo:               elevate,
+          },
+        )
         .wrap_err("Bootloader activation failed")?;
+      } else {
+        Command::new("nix")
+          .elevate(elevate.then_some(elevation.clone()))
+          .args(["build", "--no-link", "--profile", SYSTEM_PROFILE])
+          .arg(canonical_out_path)
+          .with_required_env()
+          .run()
+          .wrap_err("Failed to set system profile")?;
+
+        let mut cmd = Command::new(switch_to_configuration)
+          .arg("boot")
+          .elevate(elevate.then_some(elevation))
+          .message("Adding configuration to bootloader")
+          .preserve_envs(["NIXOS_INSTALL_BOOTLOADER"]);
+
+        if self.rebuild.install_bootloader {
+          cmd = cmd.set_env("NIXOS_INSTALL_BOOTLOADER", "1");
+        }
+
+        cmd
+          .with_required_env()
+          .run()
+          .wrap_err("Bootloader activation failed")?;
+      }
     }
 
     debug!("Completed {variant:?} operation with output path: {out_path:?}");

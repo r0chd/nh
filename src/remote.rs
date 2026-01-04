@@ -242,7 +242,7 @@ impl RemoteHost {
   ///
   /// Used for hostname comparisons when determining if two `RemoteHost`
   /// instances refer to the same physical host (e.g., detecting when
-  /// build_host == target_host regardless of different user credentials).
+  /// `build_host` == `target_host` regardless of different user credentials).
   ///
   /// Returns the bracketed IPv6 address as-is if present (e.g.,
   /// `[2001:db8::1]`).
@@ -846,6 +846,70 @@ fn copy_closure_from(
   Ok(())
 }
 
+/// Copy a Nix closure from localhost to a remote host.
+///
+/// Uses `nix copy --to ssh://host` to transfer a store path and its
+/// dependencies from the local Nix store to a remote machine via SSH.
+///
+/// When `use_substitutes` is enabled, the remote host will attempt to fetch
+/// missing paths from configured binary caches instead of transferring them
+/// over SSH, which can significantly improve performance and reduce bandwidth
+/// usage.
+///
+/// # Arguments
+///
+/// * `host` - The remote host to copy the closure to. SSH connection
+///   multiplexing and options from `NIX_SSHOPTS` are automatically applied.
+/// * `path` - The store path to copy (e.g., `/nix/store/xxx-nixos-system`). All
+///   dependencies (the complete closure) are copied automatically.
+/// * `use_substitutes` - When `true`, adds `--substitute-on-destination` to
+///   allow the remote host to fetch missing paths from binary caches instead of
+///   transferring them over SSH.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success, or an error if the copy operation fails.
+///
+/// # Errors
+///
+/// Returns an error if:
+///
+/// - The SSH connection to the remote host fails
+/// - The `nix copy` command fails (e.g., insufficient disk space on remote,
+///   network issues, authentication failures)
+/// - The path does not exist in the local store
+pub fn copy_to_remote(
+  host: &RemoteHost,
+  path: &Path,
+  use_substitutes: bool,
+) -> Result<()> {
+  info!("Copying closure to remote host '{}'", host);
+
+  let flake_flags = get_flake_flags();
+  let mut cmd = Exec::cmd("nix")
+    .args(&flake_flags)
+    .args(&["copy", "--to"])
+    .arg(format!("ssh://{}", host.ssh_host()));
+
+  if use_substitutes {
+    cmd = cmd.arg("--substitute-on-destination");
+  }
+
+  cmd = cmd.arg(path).env("NIX_SSHOPTS", get_nix_sshopts_env());
+
+  debug!(?cmd, "nix copy --to");
+
+  let capture = cmd
+    .capture()
+    .wrap_err("Failed to copy closure to remote host")?;
+
+  if !capture.exit_status.success() {
+    bail!("nix copy --to '{}' failed:\n{}", host, capture.stderr_str());
+  }
+
+  Ok(())
+}
+
 /// Copy a Nix closure from one remote host to another.
 /// Uses `nix copy --from ssh://source --to ssh://dest`.
 fn copy_closure_between_remotes(
@@ -887,6 +951,256 @@ fn copy_closure_between_remotes(
 
   Ok(())
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Represents the type of activation to perform on a remote system.
+///
+/// This determines which action the system's activation script will execute.
+pub enum ActivationType {
+  /// Run the configuration in a test mode without activating
+  Test,
+
+  /// Atomically switch to the new configuration
+  Switch,
+
+  /// Make the new configuration the default boot option
+  Boot,
+}
+
+impl ActivationType {
+  /// Get the string representation used by activation scripts.
+  #[must_use]
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Test => "test",
+      Self::Switch => "switch",
+      Self::Boot => "boot",
+    }
+  }
+}
+
+/// Represents the target platform for remote operations.
+///
+/// This enum allows the remote module to support multiple platforms while
+/// keeping the implementation generic. Currently only NixOS is implemented.
+/// Other platforms can be added in the future.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+  /// NixOS system configuration
+  NixOS,
+  // TODO: Add Darwin and HomeManager support
+  //
+  // To add support for other platforms:
+  //
+  // 1. Add the platform variant to this enum
+  // 2. Implement platform-specific activation logic in a (private) function
+  // 3. Update `activate_remote()` to dispatch to the new platform handler
+  // Darwin,
+  // HomeManager,
+}
+
+/// Configuration for remote activation operations.
+#[derive(Debug)]
+pub struct ActivateRemoteConfig {
+  /// The target platform for activation
+  pub platform: Platform,
+
+  /// The type of activation to perform
+  pub activation_type: ActivationType,
+
+  /// Whether to install the bootloader during activation
+  pub install_bootloader: bool,
+
+  /// Whether to show output logs during activation
+  pub show_logs: bool,
+
+  /// Whether to use sudo for activation commands
+  pub sudo: bool,
+}
+
+/// Activate a system configuration on a remote host.
+///
+/// Currently only supports NixOS.
+///
+/// # Arguments
+///
+/// * `host` - The remote host to activate on
+/// * `system_profile` - The path to the NixOS system profile (e.g.,
+///   /nix/var/nix/profiles/system)
+/// * `config` - Activation configuration options
+///
+/// # Errors
+///
+/// Returns an error if SSH connection fails or activation commands fail.
+pub fn activate_remote(
+  host: &RemoteHost,
+  system_profile: &Path,
+  config: &ActivateRemoteConfig,
+) -> Result<()> {
+  match config.platform {
+    Platform::NixOS => activate_nixos_remote(host, system_profile, config),
+    // TODO:
+    // Platform::Darwin => activate_darwin_remote(host, system_profile, config),
+    // Platform::HomeManager => activate_home_remote(host, system_profile,
+    // config),
+  }
+}
+
+/// Activate a NixOS system configuration on a remote host.
+///
+/// Handles the SSH commands required to activate a NixOS system. Supports
+/// test, switch, and boot activation types.
+///
+/// # Arguments
+///
+/// * `host` - The remote host to activate on
+/// * `system_profile` - The path to the NixOS system profile
+/// * `config` - Activation configuration options
+///
+/// # Errors
+///
+/// Returns an error if SSH connection fails or activation commands fail.
+fn activate_nixos_remote(
+  host: &RemoteHost,
+  system_profile: &Path,
+  config: &ActivateRemoteConfig,
+) -> Result<()> {
+  let ssh_opts = get_ssh_opts();
+
+  let switch_to_config = system_profile.join("bin/switch-to-configuration");
+
+  let switch_path_str = switch_to_config.to_str().ok_or_else(|| {
+    eyre!("switch-to-configuration path contains invalid UTF-8")
+  })?;
+
+  match config.activation_type {
+    ActivationType::Test | ActivationType::Switch => {
+      let action = config.activation_type.as_str();
+
+      let mut ssh_cmd = Exec::cmd("ssh");
+      for opt in &ssh_opts {
+        ssh_cmd = ssh_cmd.arg(opt);
+      }
+      ssh_cmd = ssh_cmd.arg(host.ssh_host());
+
+      // Build the remote command with proper quoting
+      let remote_cmd = if config.sudo {
+        format!("sudo {} {}", shell_quote(switch_path_str), action)
+      } else {
+        format!("{} {}", shell_quote(switch_path_str), action)
+      };
+
+      ssh_cmd = ssh_cmd.arg(remote_cmd);
+
+      if config.show_logs {
+        ssh_cmd = ssh_cmd
+          .stdout(Redirection::Merge)
+          .stderr(Redirection::Merge);
+      }
+
+      debug!(?ssh_cmd, "Activating NixOS configuration");
+
+      let capture = ssh_cmd
+        .capture()
+        .wrap_err("Failed to activate NixOS configuration")?;
+
+      if !capture.exit_status.success() {
+        bail!(
+          "Activation ({}) failed on '{}':\n{}",
+          action,
+          host,
+          capture.stderr_str()
+        );
+      }
+    },
+
+    ActivationType::Boot => {
+      let mut profile_ssh_cmd = Exec::cmd("ssh");
+      for opt in &ssh_opts {
+        profile_ssh_cmd = profile_ssh_cmd.arg(opt);
+      }
+      profile_ssh_cmd = profile_ssh_cmd.arg(host.ssh_host());
+
+      // Build the remote command with proper quoting
+      let profile_remote_cmd = if config.sudo {
+        format!(
+          "sudo nix build --no-link --profile {} {}",
+          NIXOS_SYSTEM_PROFILE,
+          system_profile.display()
+        )
+      } else {
+        format!(
+          "nix build --no-link --profile {} {}",
+          NIXOS_SYSTEM_PROFILE,
+          system_profile.display()
+        )
+      };
+
+      profile_ssh_cmd = profile_ssh_cmd.arg(profile_remote_cmd);
+
+      debug!(?profile_ssh_cmd, "Setting NixOS profile");
+
+      let profile_capture = profile_ssh_cmd
+        .capture()
+        .wrap_err("Failed to set NixOS profile")?;
+
+      if !profile_capture.exit_status.success() {
+        bail!(
+          "Failed to set system profile on '{}':\n{}",
+          host,
+          profile_capture.stderr_str()
+        );
+      }
+
+      let mut boot_ssh_cmd = Exec::cmd("ssh");
+      for opt in &ssh_opts {
+        boot_ssh_cmd = boot_ssh_cmd.arg(opt);
+      }
+      boot_ssh_cmd = boot_ssh_cmd.arg(host.ssh_host());
+
+      // Build the remote command with proper quoting
+      let boot_remote_cmd = if config.install_bootloader {
+        if config.sudo {
+          format!(
+            "sudo NIXOS_INSTALL_BOOTLOADER=1 {} boot",
+            shell_quote(switch_path_str)
+          )
+        } else {
+          format!(
+            "NIXOS_INSTALL_BOOTLOADER=1 {} boot",
+            shell_quote(switch_path_str)
+          )
+        }
+      } else if config.sudo {
+        format!("sudo {} boot", shell_quote(switch_path_str))
+      } else {
+        format!("{} boot", shell_quote(switch_path_str))
+      };
+
+      boot_ssh_cmd = boot_ssh_cmd.arg(boot_remote_cmd);
+
+      debug!(?boot_ssh_cmd, "Bootloader activation");
+
+      let boot_capture = boot_ssh_cmd
+        .capture()
+        .wrap_err("Bootloader activation failed")?;
+
+      if !boot_capture.exit_status.success() {
+        bail!(
+          "Bootloader activation failed on '{}':\n{}",
+          host,
+          boot_capture.stderr_str()
+        );
+      }
+    },
+  }
+
+  Ok(())
+}
+
+/// System profile path for NixOS.
+/// Used by remote activation functions.
+const NIXOS_SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
 
 /// Evaluate a flake installable to get its derivation path.
 /// Matches nixos-rebuild-ng: `nix eval --raw <flake>.drvPath`
@@ -1058,7 +1372,14 @@ pub fn build_remote(
         "Skipping copy from build host to target host (same host: {})",
         build_host.hostname()
       );
-      out_link.is_some()
+
+      // When build_host == target_host and both are remote, the result is
+      // already where it needs to be. No need to copy to localhost even if
+      // out_link is requested, since the closure will be activated remotely.
+      // This is a little confusing, but frankly, respecting --out-link to
+      // create a local path while everything happens remotely is a bit
+      // more confusing.
+      false
     },
     Some(target_host) => {
       match copy_closure_between_remotes(
@@ -1093,13 +1414,22 @@ pub fn build_remote(
     copy_closure_from(build_host, &out_path, use_substitutes)?;
   }
 
-  // Create local out-link if requested
+  // Create local out-link if requested and the result is in local store
+  // When build_host == target_host (both remote), skip out-link creation
+  // since the closure is remote and won't be copied to localhost
   if let Some(link) = out_link {
-    debug!("Creating out-link: {} -> {}", link.display(), out_path);
-    // Remove existing symlink/file if present
-    let _ = std::fs::remove_file(link);
-    std::os::unix::fs::symlink(&out_path, link)
-      .wrap_err("Failed to create out-link")?;
+    if need_local_copy {
+      debug!("Creating out-link: {} -> {}", link.display(), out_path);
+      // Remove existing symlink/file if present
+      let _ = std::fs::remove_file(link);
+      std::os::unix::fs::symlink(&out_path, link)
+        .wrap_err("Failed to create out-link")?;
+    } else {
+      debug!(
+        "Skipping out-link creation: result is on remote host and not copied \
+         to localhost"
+      );
+    }
   }
 
   Ok(PathBuf::from(out_path))

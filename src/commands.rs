@@ -191,13 +191,6 @@ impl Command {
     self
   }
 
-  /// Set the SSH target for remote command execution.
-  #[must_use]
-  pub fn ssh(mut self, ssh: Option<String>) -> Self {
-    self.ssh = ssh;
-    self
-  }
-
   /// Add a single argument to the command.
   #[must_use]
   pub fn arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
@@ -858,7 +851,6 @@ mod tests {
       .dry(true)
       .show_output(true)
       .elevate(Some(ElevationStrategy::Force("sudo")))
-      .ssh(Some("host".to_string()))
       .message("test message")
       .arg("arg1")
       .args(["arg2", "arg3"]);
@@ -866,7 +858,6 @@ mod tests {
     assert!(cmd.dry);
     assert!(cmd.show_output);
     assert_eq!(cmd.elevate, Some(ElevationStrategy::Force("sudo")));
-    assert_eq!(cmd.ssh, Some("host".to_string()));
     assert_eq!(cmd.message, Some("test message".to_string()));
     assert_eq!(cmd.args, vec![
       OsString::from("arg1"),
