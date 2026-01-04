@@ -41,9 +41,17 @@ fn main() -> Result<()> {
   // added to setup_environment in the future.
   checks::verify_variables()?;
 
-  let elevation = args
-    .elevation_program
-    .map_or(ElevationStrategy::Auto, ElevationStrategy::Prefer);
+  let elevation =
+    args
+      .elevation_strategy
+      .as_ref()
+      .map_or(ElevationStrategy::Auto, |path| {
+        match path.to_str() {
+          Some("none") => ElevationStrategy::None,
+          Some("passwordless") => ElevationStrategy::Passwordless,
+          _ => ElevationStrategy::Prefer(path.clone()),
+        }
+      });
 
   args.command.run(elevation)
 }

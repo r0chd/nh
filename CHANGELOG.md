@@ -18,6 +18,13 @@ functionality, under the "Removed" section.
 
 ### Changed
 
+- `--elevation-program` flag was renamed to `--elevation-strategy` with support
+  for `'none'` (no elevation) and `'passwordless'` (for remote hosts with
+  `NOPASSWD` configured) values. The old flag name remains available as an alias
+  for backward compatibility. It may be removed at a later version.
+  ([#434](https://github.com/nix-community/nh/issues/434))
+  - Multi-program remote elevation support: `sudo`, `doas`, `run0`, and `pkexec`
+    are now supported with correct flags for each program
 - Platform commands (`nh os`, `nh home`, `nh darwin`) now support SSH-based
   remote builds via `--build-host`. The flag now uses proper remote build
   semantics: derivations are copied to the remote host via `nix-copy-closure`,
@@ -33,7 +40,7 @@ functionality, under the "Removed" section.
     fragility.
 - Shell argument splitting now uses `shlex` for proper quote handling in complex
   command arguments.
-- `nh os info` now support `--fields` to select which field(s) to display
+- `nh os info` now supports `--fields` to select which field(s) to display
   ([#375](https://github.com/nix-community/nh/issues/375)).
   - Empty columns are now hidden by default to avoid visual clutter.
   - A new, per-generation "Closure Size" column has been added
@@ -63,7 +70,7 @@ functionality, under the "Removed" section.
     variable.
   - `nh search` displays a link to the `package.nix` file on the nixpkgs GitHub,
     and also fixes the existing links so that they no longer brokenly point to a
-    non-existent file path on nix flake systems.
+    non-existent file path on Nix flake systems.
 
 ### Fixed
 
@@ -87,6 +94,8 @@ functionality, under the "Removed" section.
     the installable such as (`./flake.nix#myHost`) in the past and lead to
     confusing behaviour for those unfamiliar. Such arguments are now normalized
     with a warning if NH can parse them.
+  - Password caching now works across all remote operations.
+  - Empty password validation prevents invalid credential caching.
 
 ### Removed
 

@@ -70,7 +70,7 @@ impl interface::OsArgs {
         if args.common.ask || args.common.dry {
           warn!("`--ask` and `--dry` have no effect for `nh os build`");
         }
-        args.build_only(&Build, None, elevation)
+        args.build_only(&Build, None, &elevation)
       },
       OsSubcommand::BuildVm(args) => args.build_vm(elevation),
       OsSubcommand::Repl(args) => args.run(),
@@ -107,7 +107,7 @@ impl OsBuildVmArgs {
 
     // Show warning if no hostname was explicitly provided for VM builds
     if self.common.hostname.is_none() {
-      let (_, target_hostname) = self.common.setup_build_context()?;
+      let (_, target_hostname) = self.common.setup_build_context(&elevation)?;
       tracing::warn!(
         "Guessing system is {target_hostname} for a VM image. If this isn't \
          intended, use --hostname to change."
@@ -117,7 +117,7 @@ impl OsBuildVmArgs {
     self.common.build_only(
       &OsRebuildVariant::BuildVm,
       Some(&attr),
-      elevation,
+      &elevation,
     )?;
 
     // If --run flag is set, execute the VM
@@ -139,7 +139,8 @@ impl OsRebuildActivateArgs {
   ) -> Result<()> {
     use OsRebuildVariant::{Build, BuildVm};
 
-    let (elevate, target_hostname) = self.rebuild.setup_build_context()?;
+    let (elevate, target_hostname) =
+      self.rebuild.setup_build_context(&elevation)?;
 
     let (out_path, _tempdir_guard) =
       self.rebuild.determine_output_path(variant)?;
@@ -153,7 +154,8 @@ impl OsRebuildActivateArgs {
       _ => "Building NixOS configuration",
     };
 
-    self.rebuild.execute_build(toplevel, &out_path, message)?;
+    let actual_store_path =
+      self.rebuild.execute_build(toplevel, &out_path, message)?;
 
     let target_profile =
       self.rebuild.resolve_specialisation_and_profile(&out_path)?;
@@ -177,6 +179,7 @@ impl OsRebuildActivateArgs {
       variant,
       &out_path,
       &target_profile,
+      actual_store_path.as_deref(),
       elevate,
       elevation,
     )?;
@@ -189,6 +192,7 @@ impl OsRebuildActivateArgs {
     variant: &OsRebuildVariant,
     out_path: &Path,
     target_profile: &Path,
+    actual_store_path: Option<&Path>,
     elevate: bool,
     elevation: ElevationStrategy,
   ) -> Result<()> {
@@ -220,14 +224,19 @@ impl OsRebuildActivateArgs {
     }
 
     // Validate system closure before activation, unless bypassed. For remote
-    // builds where `out_path` doesn't exist locally, we can't canonicalize
-    // `target_profile`. Instead we use the path as-is for remote operations.
+    // builds, use the actual store path returned from the build. For local
+    // builds, canonicalize the target_profile.
     let is_remote_build = self.rebuild.target_host.is_some();
-    let resolved_profile: PathBuf = if is_remote_build && !out_path.exists() {
-      // Remote build with no local result. Skip canonicalization, use original
-      // path
+    let resolved_profile: PathBuf = if let Some(store_path) = actual_store_path
+    {
+      // Remote build - use the actual store path from the build output
+      store_path.to_path_buf()
+    } else if is_remote_build && !out_path.exists() {
+      // Remote build with no local result and no store path captured
+      // (shouldn't happen, but fallback)
       target_profile.to_path_buf()
     } else {
+      // Local build - canonicalize the symlink to get the store path
       target_profile
         .canonicalize()
         .context("Failed to resolve output path to actual store path")?
@@ -297,7 +306,7 @@ impl OsRebuildActivateArgs {
             activation_type,
             install_bootloader: false,
             show_logs: self.show_activation_logs,
-            sudo: elevate,
+            elevation: elevate.then_some(elevation.clone()),
           },
         )
         .wrap_err(format!(
@@ -316,7 +325,16 @@ impl OsRebuildActivateArgs {
           .wrap_err("Activation (test) failed")?;
       }
 
-      debug!("Completed {variant:?} operation with output path: {out_path:?}");
+      if let Some(store_path) = actual_store_path {
+        debug!(
+          "Completed {variant:?} operation with store path: {store_path:?}"
+        );
+      } else {
+        debug!(
+          "Completed {variant:?} operation with local output path: \
+           {out_path:?}"
+        );
+      }
     }
 
     if let Boot | Switch = variant {
@@ -332,7 +350,7 @@ impl OsRebuildActivateArgs {
             activation_type:    remote::ActivationType::Boot,
             install_bootloader: self.rebuild.install_bootloader,
             show_logs:          false,
-            sudo:               elevate,
+            elevation:          elevate.then_some(elevation),
           },
         )
         .wrap_err("Bootloader activation failed")?;
@@ -362,7 +380,13 @@ impl OsRebuildActivateArgs {
       }
     }
 
-    debug!("Completed {variant:?} operation with output path: {out_path:?}");
+    if let Some(store_path) = actual_store_path {
+      debug!("Completed {variant:?} operation with store path: {store_path:?}");
+    } else {
+      debug!(
+        "Completed {variant:?} operation with local output path: {out_path:?}"
+      );
+    }
     Ok(())
   }
 }
@@ -382,14 +406,16 @@ impl OsRebuildArgs {
   ///
   /// - `bool`: `true` if elevation is required, `false` otherwise.
   /// - `String`: The resolved target hostname.
-  fn setup_build_context(&self) -> Result<(bool, String)> {
+  fn setup_build_context(
+    &self,
+    elevation: &ElevationStrategy,
+  ) -> Result<(bool, String)> {
+    // Only check SSH key login if remote hosts are involved
     if self.build_host.is_some() || self.target_host.is_some() {
-      // This can fail, we only care about prompting the user
-      // for ssh key login beforehand.
-      let _ = ensure_ssh_key_login();
+      ensure_ssh_key_login()?;
     }
 
-    let elevate = has_elevation_status(self.bypass_root_check)?;
+    let elevate = has_elevation_status(self.bypass_root_check, elevation)?;
 
     if self.update_args.update_all || self.update_args.update_input.is_some() {
       update(
@@ -445,7 +471,7 @@ impl OsRebuildArgs {
     toplevel: Installable,
     out_path: &Path,
     message: &str,
-  ) -> Result<()> {
+  ) -> Result<Option<PathBuf>> {
     // If a build host is specified, use proper remote build semantics:
     //
     // 1. Evaluate derivation locally
@@ -488,9 +514,10 @@ impl OsRebuildArgs {
       // Initialize SSH control - guard will cleanup connections on drop
       let _ssh_guard = remote::init_ssh_control();
 
-      remote::build_remote(&toplevel, &config, Some(out_path))?;
+      let actual_store_path =
+        remote::build_remote(&toplevel, &config, Some(out_path))?;
 
-      Ok(())
+      Ok(Some(actual_store_path))
     } else {
       // Local build - use the existing path
       commands::Build::new(toplevel)
@@ -501,7 +528,9 @@ impl OsRebuildArgs {
         .message(message)
         .nom(!self.common.no_nom)
         .run()
-        .wrap_err("Failed to build configuration")
+        .wrap_err("Failed to build configuration")?;
+
+      Ok(None) // Local builds don't have separate store path
     }
   }
 
@@ -585,11 +614,11 @@ impl OsRebuildArgs {
     self,
     variant: &OsRebuildVariant,
     final_attr: Option<&String>,
-    _elevation: ElevationStrategy,
+    elevation: &ElevationStrategy,
   ) -> Result<()> {
     use OsRebuildVariant::{Build, BuildVm};
 
-    let (_, target_hostname) = self.setup_build_context()?;
+    let (_, target_hostname) = self.setup_build_context(elevation)?;
 
     let (out_path, _tempdir_guard) = self.determine_output_path(variant)?;
 
@@ -617,7 +646,7 @@ impl OsRebuildArgs {
 impl OsRollbackArgs {
   #[expect(clippy::too_many_lines)]
   fn rollback(&self, elevation: ElevationStrategy) -> Result<()> {
-    let elevate = has_elevation_status(self.bypass_root_check)?;
+    let elevate = has_elevation_status(self.bypass_root_check, &elevation)?;
 
     // Find previous generation or specific generation
     let target_generation = if let Some(gen_number) = self.to {
@@ -1038,7 +1067,15 @@ fn get_nh_os_flake_env() -> Result<Option<Installable>> {
 ///
 /// Returns an error if `bypass_root_check` is false and the user is root,
 /// as `nh os` subcommands should not be run directly as root.
-fn has_elevation_status(bypass_root_check: bool) -> Result<bool> {
+fn has_elevation_status(
+  bypass_root_check: bool,
+  elevation: &commands::ElevationStrategy,
+) -> Result<bool> {
+  // If elevation strategy is None, never elevate
+  if matches!(elevation, commands::ElevationStrategy::None) {
+    return Ok(false);
+  }
+
   if bypass_root_check {
     warn!("Bypassing root check, now running nix as root");
     Ok(false)

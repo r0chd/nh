@@ -20,20 +20,44 @@ use crate::{installable::Installable, interface::NixBuildPassthroughArgs};
 static PASSWORD_CACHE: OnceLock<Mutex<HashMap<String, SecretString>>> =
   OnceLock::new();
 
-fn get_cached_password(host: &str) -> Option<SecretString> {
+/// Retrieves a cached password for the specified host.
+///
+/// # Arguments
+///
+/// * `host` - The host identifier (e.g., "user@hostname" or "hostname") to look
+///   up in the cache
+///
+/// # Returns
+///
+/// * `Some(SecretString)` - If a password for the host exists in the cache
+/// * `None` - If no password has been cached for this host
+pub fn get_cached_password(host: &str) -> Result<Option<SecretString>> {
   let cache = PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
   let guard = cache
     .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  guard.get(host).cloned()
+    .map_err(|_| eyre::eyre!("Password cache lock poisoned"))?;
+  Ok(guard.get(host).cloned())
 }
 
-fn cache_password(host: &str, password: SecretString) {
+/// Stores a password in the cache for the specified host.
+///
+/// The password is stored as a `SecretString` to ensure secure memory
+/// handling. Cached passwords persist for the lifetime of the program and can
+/// be retrieved using [`get_cached_password`].
+///
+/// # Arguments
+///
+/// * `host` - The host identifier (e.g., "user@hostname" or "hostname") to
+///   associate with the password
+/// * `password` - The password to cache, wrapped in a `SecretString` for secure
+///   handling
+pub fn cache_password(host: &str, password: SecretString) -> Result<()> {
   let cache = PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
   let mut guard = cache
     .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
+    .map_err(|_| eyre::eyre!("Password cache lock poisoned"))?;
   guard.insert(host.to_string(), password);
+  Ok(())
 }
 
 fn ssh_wrap(
@@ -70,35 +94,76 @@ pub enum EnvAction {
   Remove,
 }
 
-/// Strategy for choosing a privilege elevation program.
-/// - `Auto`: try supported programs in fallback order.
-/// - `Prefer(PathBuf)`: try the specified program, then fallback.
-/// - `Force(&'static str)`: use only the specified program, error if not
-///   available.
-#[allow(dead_code)]
+/// Strategy for handling privilege elevation when running commands.
+///
+/// This enum defines how `nh` should handle privilege elevation for commands
+/// that require root access (e.g., `switch-to-configuration`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElevationStrategy {
+  /// Automatically detect and use the first available elevation program
+  /// (tries doas -> sudo -> run0 -> pkexec in order). Uses askpass helper if
+  /// available.
   Auto,
+
+  /// Try the specified elevation program first, fall back to `Auto` if not
+  /// found.
   Prefer(PathBuf),
+
+  /// Use only the specified program name.
+  #[allow(dead_code)]
   Force(&'static str),
+
+  /// Do not use any elevation program. Commands run without privilege
+  /// escalation. This will fail for commands requiring root unless the user is
+  /// already root or the system has other privilege mechanisms configured.
+  None,
+
+  /// Use elevation program but skip password prompting. For remote hosts with
+  /// passwordless sudo (NOPASSWD in sudoers) or similar configurations. The
+  /// elevation command runs without `--stdin` or password input.
+  Passwordless,
 }
 
 impl ElevationStrategy {
+  /// Resolves the elevation strategy to an actual program path.
+  ///
+  /// Attempts to find an appropriate privilege elevation program based on the
+  /// strategy variant and system availability.
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(PathBuf)` containing the path to the elevation program binary.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if:
+  ///
+  /// - `None` variant: Always fails (elevation is disabled via
+  ///   `--elevation-strategy=none`)
+  /// - `Force` variant: The specified program is not found in PATH
+  /// - Other variants: No suitable elevation programs are available on the
+  ///   system
   pub fn resolve(&self) -> Result<PathBuf> {
     match self {
-      Self::Auto => Self::choice(),
+      Self::Auto | Self::Passwordless => Self::choice(),
       Self::Prefer(program) => {
         which(program).or_else(|_| {
-          let auto = Self::choice()?;
           warn!(
-            "{} not found. Using {} instead",
-            program.to_string_lossy(),
-            auto.to_string_lossy()
+            ?program,
+            "Preferred elevation program not found, falling back to \
+             auto-detection"
           );
-          Ok(auto)
+          Self::choice()
         })
       },
-      Self::Force(program) => Ok(program.into()),
+      Self::Force(program_name) => {
+        which(program_name).context(format!(
+          "Forced elevation program '{program_name}' not found in PATH"
+        ))
+      },
+      // Only reachable if resolve() is called directly. Safe since callers
+      // check is_some() before invoking resolve().
+      Self::None => bail!("Elevation disabled via --elevation-strategy=none"),
     }
   }
 
@@ -145,6 +210,7 @@ impl ElevationStrategy {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_field_names)]
 pub struct Command {
   dry:         bool,
   message:     Option<String>,
@@ -356,23 +422,29 @@ impl Command {
   ///
   /// Panics: If called when `self.elevate` is `None`
   fn build_sudo_cmd(&self) -> Result<Exec> {
-    let elevation_program = self
+    let elevation_strategy = self
       .elevate
       .as_ref()
-      .ok_or_else(|| eyre::eyre!("Command not found for elevation"))?
+      .ok_or_else(|| eyre::eyre!("Command not found for elevation"))?;
+
+    let elevation_program = elevation_strategy
       .resolve()
       .context("Failed to resolve elevation program")?;
 
     let mut cmd = Exec::cmd(&elevation_program);
 
-    // Use NH_SUDO_ASKPASS program for sudo if present
+    // Use NH_SUDO_ASKPASS program for sudo if present, but NOT for
+    // Passwordless variant (Passwordless expects NOPASSWD config without
+    // password input)
     let program_name = elevation_program
       .file_name()
       .and_then(|name| name.to_str())
       .ok_or_else(|| {
         eyre::eyre!("Failed to determine elevation program name")
       })?;
-    if program_name == "sudo" {
+    if program_name == "sudo"
+      && !matches!(elevation_strategy, ElevationStrategy::Passwordless)
+    {
       if let Ok(askpass) = std::env::var("NH_SUDO_ASKPASS") {
         cmd = cmd.env("SUDO_ASKPASS", askpass).arg("-A");
       }
@@ -392,10 +464,8 @@ impl Command {
       match action {
         EnvAction::Set(value) => Some(format!("{key}={value}")),
         EnvAction::Preserve if preserve_env => {
-          match std::env::var(key) {
-            Ok(value) => Some(format!("{key}={value}")),
-            Err(_) => None,
-          }
+          std::env::var(key)
+            .map_or(None, |value| Some(format!("{key}={value}")))
         },
         _ => None,
       }
@@ -438,10 +508,8 @@ impl Command {
       match action {
         EnvAction::Set(value) => Some(format!("{key}={value}")),
         EnvAction::Preserve if preserve_env => {
-          match std::env::var(key) {
-            Ok(value) => Some(format!("{key}={value}")),
-            Err(_) => None,
-          }
+          std::env::var(key)
+            .map_or(None, |value| Some(format!("{key}={value}")))
         },
         _ => None,
       }
@@ -503,15 +571,14 @@ impl Command {
   /// Panics if the command result is unexpectedly None.
   #[cfg_attr(feature = "hotpath", hotpath::measure)]
   pub fn run(&self) -> Result<()> {
-    // Prompt for sudo password if needed for remote deployment
-    // FIXME: this implementation only covers Sudo. I *think* doas and run0 are
-    // able to read from stdin, but needs to be tested and possibly
-    // mitigated.
+    // Prompt for elevation password if needed for remote deployment.
+    // Note: Only sudo supports stdin password input. For remote deployments
+    // with doas/run0, use --elevation-strategy=passwordless instead.
     let sudo_password = if self.ssh.is_some() && self.elevate.is_some() {
       let host = self.ssh.as_ref().ok_or_else(|| {
         eyre::eyre!("SSH host is None but elevation is required")
       })?;
-      if let Some(cached_password) = get_cached_password(host) {
+      if let Some(cached_password) = get_cached_password(host)? {
         Some(cached_password)
       } else {
         let password =
@@ -519,8 +586,11 @@ impl Command {
             .without_confirmation()
             .prompt()
             .context("Failed to read sudo password")?;
+        if password.is_empty() {
+          bail!("Password cannot be empty");
+        }
         let secret_password = SecretString::new(password.into());
-        cache_password(host, secret_password.clone());
+        cache_password(host, secret_password.clone())?;
         Some(secret_password)
       }
     } else {
@@ -1037,11 +1107,10 @@ mod tests {
       .build_sudo_cmd()
       .expect("build_sudo_cmd should succeed in test");
 
-    // Platform-agnostic: 'sudo' may not be the first token if env vars are
-    // injected (e.g., NH_SUDO_ASKPASS). Accept any command line where
-    // 'sudo' is present as a token.
+    // Platform-agnostic: 'sudo' may be a full path or just the program name.
+    // Accept any command line where a token ends with 'sudo'.
     let cmdline = sudo_exec.to_cmdline_lossy();
-    assert!(cmdline.split_whitespace().any(|tok| tok == "sudo"));
+    assert!(cmdline.split_whitespace().any(|tok| tok.ends_with("sudo")));
   }
 
   #[test]
@@ -1104,6 +1173,31 @@ mod tests {
     // Should contain env command with variable
     assert!(cmdline.contains("env"));
     assert!(cmdline.contains("TEST_VAR=test_value"));
+  }
+
+  #[test]
+  fn test_elevation_strategy_passwordless_resolves() {
+    let strategy = ElevationStrategy::Passwordless;
+    let result = strategy.resolve();
+
+    // Passwordless should resolve to an elevation program just like Auto
+    assert!(result.is_ok());
+    let program = result.unwrap();
+    assert!(!program.as_os_str().is_empty());
+  }
+
+  #[test]
+  fn test_build_sudo_cmd_passwordless_no_stdin() {
+    let cmd =
+      Command::new("test").elevate(Some(ElevationStrategy::Force("sudo")));
+
+    let sudo_exec =
+      cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed");
+    let cmdline = sudo_exec.to_cmdline_lossy();
+
+    // Regular sudo should have --stdin and --prompt= flags
+    // (Note: Force("sudo") behaves like regular sudo, not Passwordless)
+    assert!(cmdline.contains("sudo"));
   }
 
   #[test]

@@ -51,9 +51,21 @@ pub struct Main {
   /// more detailed logs.
   pub verbosity: clap_verbosity_flag::Verbosity<InfoLevel>,
 
-  #[arg(short, long, global = true, env = "NH_ELEVATION_PROGRAM", value_hint = clap::ValueHint::CommandName)]
-  /// Choose what privilege elevation program should be used
-  pub elevation_program: Option<PathBuf>,
+  #[arg(
+    short,
+    long,
+    global = true,
+    env = "NH_ELEVATION_STRATEGY",
+    value_hint = clap::ValueHint::CommandName,
+    alias = "elevation-program"
+  )]
+  /// Choose the privilege elevation strategy.
+  ///
+  /// Can be a path to an elevation program (e.g., /usr/bin/sudo),
+  /// or one of: 'none' (no elevation),
+  /// 'passwordless' (use elevation without password prompt for remote hosts
+  /// with NOPASSWD configured)
+  pub elevation_strategy: Option<PathBuf>,
 
   #[command(subcommand)]
   pub command: NHCommand,
