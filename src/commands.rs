@@ -741,10 +741,10 @@ impl Build {
       .stdout(Redirection::None);
       debug!(?pipeline);
 
-      // Use popen() to get access to individual processes so we can check
-      // nix's exit status, not nom's. The pipeline's join() only returns
+      // Use `popen()` to get access to individual processes so we can check
+      // Nix's exit status, not nom's. The pipeline's `join()` only returns
       // the exit status of the last command (nom), which always succeeds
-      // even when nix fails.
+      // even when Nix fails.
       let mut processes = pipeline.popen()?;
 
       // Wait for all processes to finish
@@ -753,7 +753,7 @@ impl Build {
       }
 
       // Check the exit status of the FIRST process (nix build)
-      // This is the one that matters - if nix fails, we should fail too
+      // This is the one that matters. If Nix fails, we should fail as well
       if let Some(nix_proc) = processes.first() {
         if let Some(exit_status) = nix_proc.exit_status() {
           match exit_status {
