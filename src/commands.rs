@@ -1,7 +1,9 @@
 use std::{
   collections::HashMap,
+  convert::Infallible,
   ffi::{OsStr, OsString},
   path::PathBuf,
+  str::FromStr,
   sync::{Mutex, OnceLock},
 };
 
@@ -31,6 +33,10 @@ static PASSWORD_CACHE: OnceLock<Mutex<HashMap<String, SecretString>>> =
 ///
 /// * `Some(SecretString)` - If a password for the host exists in the cache
 /// * `None` - If no password has been cached for this host
+///
+/// # Errors
+///
+/// Returns an error if the password cache lock is poisoned.
 pub fn get_cached_password(host: &str) -> Result<Option<SecretString>> {
   let cache = PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
   let guard = cache
@@ -51,12 +57,18 @@ pub fn get_cached_password(host: &str) -> Result<Option<SecretString>> {
 ///   associate with the password
 /// * `password` - The password to cache, wrapped in a `SecretString` for secure
 ///   handling
+///
+/// # Errors
+///
+/// Returns an error if the password cache lock is poisoned.
 pub fn cache_password(host: &str, password: SecretString) -> Result<()> {
   let cache = PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-  let mut guard = cache
+
+  cache
     .lock()
-    .map_err(|_| eyre::eyre!("Password cache lock poisoned"))?;
-  guard.insert(host.to_string(), password);
+    .map_err(|_| eyre::eyre!("Password cache lock poisoned"))?
+    .insert(host.to_string(), password);
+
   Ok(())
 }
 
@@ -94,7 +106,42 @@ pub enum EnvAction {
   Remove,
 }
 
-/// Strategy for handling privilege elevation when running commands.
+/// Strategy argument for handling privilege elevation when running commands.
+///
+/// Defines how `nh` should handle privilege elevation for commands
+/// that require root access (e.g., `switch-to-configuration`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElevationStrategyArg {
+  /// No elevation - commands run without privilege escalation.
+  None,
+
+  /// Automatically detect and use the first available elevation program
+  /// (tries doas -> sudo -> run0 -> pkexec in order). Uses askpass helper if
+  /// available.
+  Auto,
+
+  /// Use elevation program but skip password prompting for remote hosts with
+  /// NOPASSWD configured.
+  Passwordless,
+
+  /// Use the specified elevation program.
+  Program(PathBuf),
+}
+
+impl FromStr for ElevationStrategyArg {
+  type Err = Infallible;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s {
+      "none" => Ok(Self::None),
+      "auto" => Ok(Self::Auto),
+      "passwordless" => Ok(Self::Passwordless),
+      _ => Ok(Self::Program(PathBuf::from(s))),
+    }
+  }
+}
+
+/// Strategy for handling privilege elevation at runtime.
 ///
 /// This enum defines how `nh` should handle privilege elevation for commands
 /// that require root access (e.g., `switch-to-configuration`).
@@ -106,11 +153,11 @@ pub enum ElevationStrategy {
   Auto,
 
   /// Try the specified elevation program first, fall back to `Auto` if not
-  /// found.
+  /// found. Corresponds to CLI argument that is a path.
   Prefer(PathBuf),
 
   /// Use only the specified program name.
-  #[allow(dead_code)]
+  #[allow(dead_code, reason = "In use")]
   Force(&'static str),
 
   /// Do not use any elevation program. Commands run without privilege
@@ -849,6 +896,12 @@ pub struct ExitError(ExitStatus);
 
 #[cfg(test)]
 mod tests {
+  #![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::unreachable,
+    reason = "Fine in tests"
+  )]
   use std::{env, ffi::OsString};
 
   use serial_test::serial;
@@ -867,7 +920,7 @@ mod tests {
       unsafe {
         env::set_var(key, value);
       }
-      EnvGuard {
+      Self {
         key: key.to_string(),
         original,
       }
@@ -1424,7 +1477,7 @@ mod tests {
   #[test]
   fn test_parse_cmdline_realistic_sudo() {
     let cmdline =
-      r#"/usr/bin/sudo env 'PATH=/path with spaces' /usr/bin/nh clean all"#;
+      r"/usr/bin/sudo env 'PATH=/path with spaces' /usr/bin/nh clean all";
     let result = shlex::split(cmdline).unwrap_or_default();
     assert_eq!(result, vec![
       "/usr/bin/sudo",
@@ -1499,6 +1552,7 @@ mod tests {
       (EnvAction::Set(orig_val), EnvAction::Set(cloned_val)) => {
         assert_eq!(orig_val, cloned_val);
       },
+      #[allow(clippy::unreachable, reason = "Should never happen")]
       _ => unreachable!("Clone should preserve variant and value"),
     }
   }

@@ -25,6 +25,8 @@ functionality, under the "Removed" section.
   ([#434](https://github.com/nix-community/nh/issues/434))
   - Multi-program remote elevation support: `sudo`, `doas`, `run0`, and `pkexec`
     are now supported with correct flags for each program
+  - Environment variable `NH_ELEVATION_PROGRAM` is still supported for backward
+    compatibility (falls back to `NH_ELEVATION_STRATEGY` if set)
 - Platform commands (`nh os`, `nh home`, `nh darwin`) now support SSH-based
   remote builds via `--build-host`. The flag now uses proper remote build
   semantics: derivations are copied to the remote host via `nix-copy-closure`,
@@ -94,8 +96,8 @@ functionality, under the "Removed" section.
     the installable such as (`./flake.nix#myHost`) in the past and lead to
     confusing behaviour for those unfamiliar. Such arguments are now normalized
     with a warning if NH can parse them.
-  - Password caching now works across all remote operations.
-  - Empty password validation prevents invalid credential caching.
+- Password caching now works across all remote operations.
+- Empty password validation prevents invalid credential caching.
 
 ### Removed
 
