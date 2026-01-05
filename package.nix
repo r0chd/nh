@@ -5,6 +5,7 @@
   makeBinaryWrapper,
   installShellFiles,
   versionCheckHook,
+  sudo,
   use-nom ? true,
   nix-output-monitor ? null,
   rev ? "dirty",
@@ -37,6 +38,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
     installShellFiles
     makeBinaryWrapper
   ];
+
+  nativeCheckInputs = [ sudo ];
 
   cargoBuildFlags = [
     "-p"
