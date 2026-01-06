@@ -33,6 +33,16 @@ const CURRENT_PROFILE: &str = "/run/current-system";
 
 const SPEC_LOCATION: &str = "/etc/specialisation";
 
+/// Essential files that must exist in a valid NixOS system closure. Each tuple
+/// contains the file path relative to the system profile and its description.
+/// The descriptions are used on log messages or errors.
+const ESSENTIAL_FILES: &[(&str, &str)] = &[
+  ("bin/switch-to-configuration", "activation script"),
+  ("nixos-version", "system version identifier"),
+  ("init", "system init script"),
+  ("sw/bin", "system path"),
+];
+
 impl interface::OsArgs {
   /// Executes the NixOS subcommand.
   ///
@@ -942,15 +952,8 @@ fn run_vm(out_path: &Path) -> Result<()> {
 ///
 /// `Ok(())` if all files exist, or an error listing missing files.
 fn validate_system_closure(system_path: &Path) -> Result<()> {
-  let essential_files = [
-    ("bin/switch-to-configuration", "activation script"),
-    ("nixos-version", "system version identifier"),
-    ("init", "system init script"),
-    ("sw/bin", "system path"),
-  ];
-
   let mut missing = Vec::new();
-  for (file, description) in &essential_files {
+  for (file, description) in ESSENTIAL_FILES {
     let path = system_path.join(file);
     if !path.exists() {
       missing.push(format!("  - {file} ({description})"));
@@ -983,14 +986,6 @@ fn validate_system_closure_remote(
   target_host: &str,
   build_host: Option<&str>,
 ) -> Result<()> {
-  let essential_files = [
-    ("bin/switch-to-configuration", "activation script"),
-    ("nixos-version", "system version identifier"),
-    ("init", "system init script"),
-    ("sw/bin", "system path"),
-  ];
-
-  // Parse the target host
   let target = remote::RemoteHost::parse(target_host)
     .wrap_err("Invalid target host specification")?;
 
@@ -1007,7 +1002,7 @@ fn validate_system_closure_remote(
   remote::validate_closure_remote(
     &target,
     system_path,
-    &essential_files,
+    ESSENTIAL_FILES,
     context.as_deref(),
   )
 }
