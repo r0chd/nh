@@ -518,7 +518,8 @@ impl Command {
         EnvAction::Set(value) => Some(format!("{key}={value}")),
         EnvAction::Preserve if preserve_env => {
           std::env::var(key)
-            .map_or(None, |value| Some(format!("{key}={value}")))
+            .ok()
+            .map(|value| format!("{key}={value}"))
         },
         _ => None,
       }
