@@ -164,6 +164,16 @@ impl OsRebuildActivateArgs {
       _ => "Building NixOS configuration",
     };
 
+    // Initialize SSH control early if we have remote hosts - guard will keep
+    // connections alive for both build and activation
+    let _ssh_guard = if self.rebuild.build_host.is_some()
+      || self.rebuild.target_host.is_some()
+    {
+      Some(remote::init_ssh_control())
+    } else {
+      None
+    };
+
     let actual_store_path =
       self.rebuild.execute_build(toplevel, &out_path, message)?;
 
@@ -520,9 +530,6 @@ impl OsRebuildArgs {
           )
           .collect(),
       };
-
-      // Initialize SSH control - guard will cleanup connections on drop
-      let _ssh_guard = remote::init_ssh_control();
 
       let actual_store_path =
         remote::build_remote(&toplevel, &config, Some(out_path))?;
