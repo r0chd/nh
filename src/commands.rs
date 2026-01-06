@@ -136,7 +136,13 @@ impl FromStr for ElevationStrategyArg {
       "none" => Ok(Self::None),
       "auto" => Ok(Self::Auto),
       "passwordless" => Ok(Self::Passwordless),
-      _ => Ok(Self::Program(PathBuf::from(s))),
+      _ => {
+        if let Some(rest) = s.strip_prefix("program:") {
+          Ok(Self::Program(PathBuf::from(rest)))
+        } else {
+          Ok(Self::Program(PathBuf::from(s)))
+        }
+      },
     }
   }
 }
@@ -1240,7 +1246,19 @@ mod tests {
   }
 
   #[test]
-  fn test_build_sudo_cmd_passwordless_no_stdin() {
+  fn test_elevation_strategy_arg_program_prefix_parsing() {
+    let parsed = "program:/path/to/bin".parse::<ElevationStrategyArg>();
+    assert!(parsed.is_ok());
+    match parsed.unwrap() {
+      ElevationStrategyArg::Program(path) => {
+        assert_eq!(path, PathBuf::from("/path/to/bin"));
+      },
+      _ => unreachable!("Expected Program variant"),
+    }
+  }
+
+  #[test]
+  fn test_build_sudo_cmd_force_no_stdin() {
     let cmd =
       Command::new("test").elevate(Some(ElevationStrategy::Force("sudo")));
 
@@ -1248,8 +1266,7 @@ mod tests {
       cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed");
     let cmdline = sudo_exec.to_cmdline_lossy();
 
-    // Regular sudo should have --stdin and --prompt= flags
-    // (Note: Force("sudo") behaves like regular sudo, not Passwordless)
+    // Force("sudo") uses regular sudo without --stdin or --prompt flags
     assert!(cmdline.contains("sudo"));
   }
 
