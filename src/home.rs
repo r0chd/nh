@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, path::PathBuf};
+use std::{convert::Into, env, ffi::OsString, path::PathBuf};
 
 use color_eyre::{
   Result,
@@ -11,6 +11,7 @@ use crate::{
   commands::Command,
   installable::Installable,
   interface::{self, DiffType, HomeRebuildArgs, HomeReplArgs, HomeSubcommand},
+  remote::{self, RemoteBuildConfig, RemoteHost},
   update::update,
   util::{get_hostname, print_dix_diff},
 };
@@ -18,9 +19,22 @@ use crate::{
 impl interface::HomeArgs {
   /// Run the `home` subcommand.
   ///
+  /// # Parameters
+  ///
+  /// * `self` - The Home Manager operation arguments
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(())` if the operation succeeds.
+  ///
   /// # Errors
   ///
-  /// Returns an error if the operation fails.
+  /// Returns an error if:
+  ///
+  /// - Build or activation operations fail
+  /// - Remote operations encounter network or SSH issues
+  /// - Nix evaluation or building fails
+  /// - File system operations fail
   #[cfg_attr(feature = "hotpath", hotpath::measure)]
   pub fn run(self) -> Result<()> {
     use HomeRebuildVariant::{Build, Switch};
@@ -95,15 +109,49 @@ impl HomeRebuildArgs {
       self.configuration.clone(),
     )?;
 
-    commands::Build::new(toplevel)
-      .extra_arg("--out-link")
-      .extra_arg(&out_path)
-      .extra_args(&self.extra_args)
-      .passthrough(&self.common.passthrough)
-      .message("Building Home-Manager configuration")
-      .nom(!self.common.no_nom)
-      .run()
-      .wrap_err("Failed to build Home-Manager configuration")?;
+    // If a build host is specified, use remote build semantics
+    if let Some(ref build_host_str) = self.build_host {
+      info!("Building Home-Manager configuration");
+
+      let build_host = RemoteHost::parse(build_host_str)
+        .wrap_err("Invalid build host specification")?;
+
+      let config = RemoteBuildConfig {
+        build_host,
+        target_host: None,
+        use_nom: !self.common.no_nom,
+        use_substitutes: self.common.passthrough.use_substitutes,
+        extra_args: self
+          .extra_args
+          .iter()
+          .map(Into::into)
+          .chain(
+            self
+              .common
+              .passthrough
+              .generate_passthrough_args()
+              .into_iter()
+              .map(Into::into),
+          )
+          .collect(),
+      };
+
+      // Initialize SSH control - guard will cleanup connections on drop
+      let _ssh_guard = remote::init_ssh_control();
+
+      remote::build_remote(&toplevel, &config, Some(&out_path))
+        .wrap_err("Failed to build Home-Manager configuration")?;
+    } else {
+      commands::Build::new(toplevel)
+        .extra_arg("--out-link")
+        .extra_arg(&out_path)
+        .extra_args(&self.extra_args)
+        .passthrough(&self.common.passthrough)
+        .message("Building Home-Manager configuration")
+        .nom(!self.common.no_nom)
+        .run()
+        .wrap_err("Failed to build Home-Manager configuration")?;
+    }
 
     let prev_generation: Option<PathBuf> = [
       PathBuf::from("/nix/var/nix/profiles/per-user")
@@ -122,12 +170,13 @@ impl HomeRebuildArgs {
     let spec_location = PathBuf::from(std::env::var("HOME")?)
       .join(".local/share/home-manager/specialisation");
 
-    let current_specialisation = if let Some(s) = spec_location.to_str() {
-      std::fs::read_to_string(s).ok()
-    } else {
-      tracing::warn!("spec_location path is not valid UTF-8");
-      None
-    };
+    let current_specialisation = spec_location.to_str().map_or_else(
+      || {
+        tracing::warn!("spec_location path is not valid UTF-8");
+        None
+      },
+      |s| std::fs::read_to_string(s).ok(),
+    );
 
     let target_specialisation = if self.no_specialisation {
       None
@@ -390,6 +439,7 @@ where
       }
     },
     Installable::Store { .. } => {},
+    #[allow(clippy::unreachable, reason = "Should never happen")]
     Installable::Unspecified => {
       unreachable!(
         "Unspecified installable should have been resolved before calling \

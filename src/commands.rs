@@ -1,7 +1,9 @@
 use std::{
   collections::HashMap,
+  convert::Infallible,
   ffi::{OsStr, OsString},
   path::PathBuf,
+  str::FromStr,
   sync::{Mutex, OnceLock},
 };
 
@@ -20,65 +22,54 @@ use crate::{installable::Installable, interface::NixBuildPassthroughArgs};
 static PASSWORD_CACHE: OnceLock<Mutex<HashMap<String, SecretString>>> =
   OnceLock::new();
 
-fn get_cached_password(host: &str) -> Option<SecretString> {
+/// Retrieves a cached password for the specified host.
+///
+/// # Arguments
+///
+/// * `host` - The host identifier (e.g., "user@hostname" or "hostname") to look
+///   up in the cache
+///
+/// # Returns
+///
+/// * `Some(SecretString)` - If a password for the host exists in the cache
+/// * `None` - If no password has been cached for this host
+///
+/// # Errors
+///
+/// Returns an error if the password cache lock is poisoned.
+pub fn get_cached_password(host: &str) -> Result<Option<SecretString>> {
   let cache = PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
   let guard = cache
     .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  guard.get(host).cloned()
+    .map_err(|_| eyre::eyre!("Password cache lock poisoned"))?;
+  Ok(guard.get(host).cloned())
 }
 
-fn cache_password(host: &str, password: SecretString) {
-  let cache = PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-  let mut guard = cache
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  guard.insert(host.to_string(), password);
-}
-
-/// Parse a command line string respecting quoted arguments.
+/// Stores a password in the cache for the specified host.
 ///
-/// Splits the command line by whitespace while preserving spaces within
-/// single or double quoted strings. Quote characters are removed from
-/// the resulting tokens.
-fn parse_cmdline_with_quotes(cmdline: &str) -> Vec<String> {
-  let mut parts = Vec::default();
-  let mut current = String::new();
-  let mut quoted = None;
+/// The password is stored as a `SecretString` to ensure secure memory
+/// handling. Cached passwords persist for the lifetime of the program and can
+/// be retrieved using [`get_cached_password`].
+///
+/// # Arguments
+///
+/// * `host` - The host identifier (e.g., "user@hostname" or "hostname") to
+///   associate with the password
+/// * `password` - The password to cache, wrapped in a `SecretString` for secure
+///   handling
+///
+/// # Errors
+///
+/// Returns an error if the password cache lock is poisoned.
+pub fn cache_password(host: &str, password: SecretString) -> Result<()> {
+  let cache = PASSWORD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-  for c in cmdline.chars() {
-    match c {
-      // Opening quote - enter quoted mode
-      '\'' | '"' if quoted.is_none() => {
-        quoted = Some(c);
-      },
-      // Closing quote - exit quoted mode
-      '\'' | '"' if quoted.is_some_and(|q| q == c) => {
-        quoted = None;
-      },
-      // Different quote type while already quoted - treat as literal
-      '\'' | '"' => {
-        current.push(c);
-      },
-      // Whitespace outside quotes - end of current token
-      s if s.is_whitespace() && quoted.is_none() => {
-        if !current.is_empty() {
-          parts.push(current.clone());
-          current.clear();
-        }
-      },
-      // Any char, add to current token
-      _ => {
-        current.push(c);
-      },
-    }
-  }
+  cache
+    .lock()
+    .map_err(|_| eyre::eyre!("Password cache lock poisoned"))?
+    .insert(host.to_string(), password);
 
-  if !current.is_empty() {
-    parts.push(current);
-  }
-
-  parts
+  Ok(())
 }
 
 fn ssh_wrap(
@@ -115,35 +106,117 @@ pub enum EnvAction {
   Remove,
 }
 
-/// Strategy for choosing a privilege elevation program.
-/// - `Auto`: try supported programs in fallback order.
-/// - `Prefer(PathBuf)`: try the specified program, then fallback.
-/// - `Force(&'static str)`: use only the specified program, error if not
-///   available.
-#[allow(dead_code)]
+/// Strategy argument for handling privilege elevation when running commands.
+///
+/// Defines how `nh` should handle privilege elevation for commands
+/// that require root access (e.g., `switch-to-configuration`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElevationStrategyArg {
+  /// No elevation - commands run without privilege escalation.
+  None,
+
+  /// Automatically detect and use the first available elevation program
+  /// (tries doas -> sudo -> run0 -> pkexec in order). Uses askpass helper if
+  /// available.
+  Auto,
+
+  /// Use elevation program but skip password prompting for remote hosts with
+  /// NOPASSWD configured.
+  Passwordless,
+
+  /// Use the specified elevation program.
+  Program(PathBuf),
+}
+
+impl FromStr for ElevationStrategyArg {
+  type Err = Infallible;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s {
+      "none" => Ok(Self::None),
+      "auto" => Ok(Self::Auto),
+      "passwordless" => Ok(Self::Passwordless),
+      _ => {
+        if let Some(rest) = s.strip_prefix("program:") {
+          Ok(Self::Program(PathBuf::from(rest)))
+        } else {
+          Ok(Self::Program(PathBuf::from(s)))
+        }
+      },
+    }
+  }
+}
+
+/// Strategy for handling privilege elevation at runtime.
+///
+/// This enum defines how `nh` should handle privilege elevation for commands
+/// that require root access (e.g., `switch-to-configuration`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ElevationStrategy {
+  /// Automatically detect and use the first available elevation program
+  /// (tries doas -> sudo -> run0 -> pkexec in order). Uses askpass helper if
+  /// available.
   Auto,
+
+  /// Try the specified elevation program first, fall back to `Auto` if not
+  /// found. Corresponds to CLI argument that is a path.
   Prefer(PathBuf),
+
+  /// Use only the specified program name.
+  #[allow(dead_code, reason = "In use")]
   Force(&'static str),
+
+  /// Do not use any elevation program. Commands run without privilege
+  /// escalation. This will fail for commands requiring root unless the user is
+  /// already root or the system has other privilege mechanisms configured.
+  None,
+
+  /// Use elevation program but skip password prompting. For remote hosts with
+  /// passwordless sudo (NOPASSWD in sudoers) or similar configurations. The
+  /// elevation command runs without `--stdin` or password input.
+  Passwordless,
 }
 
 impl ElevationStrategy {
+  /// Resolves the elevation strategy to an actual program path.
+  ///
+  /// Attempts to find an appropriate privilege elevation program based on the
+  /// strategy variant and system availability.
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(PathBuf)` containing the path to the elevation program binary.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if:
+  ///
+  /// - `None` variant: Always fails (elevation is disabled via
+  ///   `--elevation-strategy=none`)
+  /// - `Force` variant: The specified program is not found in PATH
+  /// - Other variants: No suitable elevation programs are available on the
+  ///   system
   pub fn resolve(&self) -> Result<PathBuf> {
     match self {
-      Self::Auto => Self::choice(),
+      Self::Auto | Self::Passwordless => Self::choice(),
       Self::Prefer(program) => {
         which(program).or_else(|_| {
-          let auto = Self::choice()?;
           warn!(
-            "{} not found. Using {} instead",
-            program.to_string_lossy(),
-            auto.to_string_lossy()
+            ?program,
+            "Preferred elevation program not found, falling back to \
+             auto-detection"
           );
-          Ok(auto)
+          Self::choice()
         })
       },
-      Self::Force(program) => Ok(program.into()),
+      Self::Force(program_name) => {
+        which(program_name).context(format!(
+          "Forced elevation program '{program_name}' not found in PATH"
+        ))
+      },
+      // Only reachable if resolve() is called directly. Safe since callers
+      // check is_some() before invoking resolve().
+      Self::None => bail!("Elevation disabled via --elevation-strategy=none"),
     }
   }
 
@@ -190,6 +263,7 @@ impl ElevationStrategy {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_field_names)]
 pub struct Command {
   dry:         bool,
   message:     Option<String>,
@@ -233,13 +307,6 @@ impl Command {
   #[must_use]
   pub const fn show_output(mut self, show_output: bool) -> Self {
     self.show_output = show_output;
-    self
-  }
-
-  /// Set the SSH target for remote command execution.
-  #[must_use]
-  pub fn ssh(mut self, ssh: Option<String>) -> Self {
-    self.ssh = ssh;
     self
   }
 
@@ -346,7 +413,7 @@ impl Command {
     if self.elevate.is_some() && cfg!(target_os = "macos") {
       self
         .env_vars
-        .insert("HOME".to_string(), EnvAction::Set("".to_string()));
+        .insert("HOME".to_string(), EnvAction::Set(String::new()));
     }
 
     // Preserve all variables in PRESERVE_ENV if present
@@ -408,23 +475,29 @@ impl Command {
   ///
   /// Panics: If called when `self.elevate` is `None`
   fn build_sudo_cmd(&self) -> Result<Exec> {
-    let elevation_program = self
+    let elevation_strategy = self
       .elevate
       .as_ref()
-      .ok_or_else(|| eyre::eyre!("Command not found for elevation"))?
+      .ok_or_else(|| eyre::eyre!("Command not found for elevation"))?;
+
+    let elevation_program = elevation_strategy
       .resolve()
       .context("Failed to resolve elevation program")?;
 
     let mut cmd = Exec::cmd(&elevation_program);
 
-    // Use NH_SUDO_ASKPASS program for sudo if present
+    // Use NH_SUDO_ASKPASS program for sudo if present, but NOT for
+    // Passwordless variant (Passwordless expects NOPASSWD config without
+    // password input)
     let program_name = elevation_program
       .file_name()
       .and_then(|name| name.to_str())
       .ok_or_else(|| {
         eyre::eyre!("Failed to determine elevation program name")
       })?;
-    if program_name == "sudo" {
+    if program_name == "sudo"
+      && !matches!(elevation_strategy, ElevationStrategy::Passwordless)
+    {
       if let Ok(askpass) = std::env::var("NH_SUDO_ASKPASS") {
         cmd = cmd.env("SUDO_ASKPASS", askpass).arg("-A");
       }
@@ -444,10 +517,9 @@ impl Command {
       match action {
         EnvAction::Set(value) => Some(format!("{key}={value}")),
         EnvAction::Preserve if preserve_env => {
-          match std::env::var(key) {
-            Ok(value) => Some(format!("{key}={value}")),
-            Err(_) => None,
-          }
+          std::env::var(key)
+            .ok()
+            .map(|value| format!("{key}={value}"))
         },
         _ => None,
       }
@@ -490,10 +562,8 @@ impl Command {
       match action {
         EnvAction::Set(value) => Some(format!("{key}={value}")),
         EnvAction::Preserve if preserve_env => {
-          match std::env::var(key) {
-            Ok(value) => Some(format!("{key}={value}")),
-            Err(_) => None,
-          }
+          std::env::var(key)
+            .map_or(None, |value| Some(format!("{key}={value}")))
         },
         _ => None,
       }
@@ -555,15 +625,14 @@ impl Command {
   /// Panics if the command result is unexpectedly None.
   #[cfg_attr(feature = "hotpath", hotpath::measure)]
   pub fn run(&self) -> Result<()> {
-    // Prompt for sudo password if needed for remote deployment
-    // FIXME: this implementation only covers Sudo. I *think* doas and run0 are
-    // able to read from stdin, but needs to be tested and possibly
-    // mitigated.
+    // Prompt for elevation password if needed for remote deployment.
+    // Note: Only sudo supports stdin password input. For remote deployments
+    // with doas/run0, use --elevation-strategy=passwordless instead.
     let sudo_password = if self.ssh.is_some() && self.elevate.is_some() {
       let host = self.ssh.as_ref().ok_or_else(|| {
         eyre::eyre!("SSH host is None but elevation is required")
       })?;
-      if let Some(cached_password) = get_cached_password(host) {
+      if let Some(cached_password) = get_cached_password(host)? {
         Some(cached_password)
       } else {
         let password =
@@ -571,8 +640,11 @@ impl Command {
             .without_confirmation()
             .prompt()
             .context("Failed to read sudo password")?;
+        if password.is_empty() {
+          bail!("Password cannot be empty");
+        }
         let secret_password = SecretString::new(password.into());
-        cache_password(host, secret_password.clone());
+        cache_password(host, secret_password.clone())?;
         Some(secret_password)
       }
     } else {
@@ -709,7 +781,6 @@ pub struct Build {
   installable: Installable,
   extra_args:  Vec<OsString>,
   nom:         bool,
-  builder:     Option<String>,
 }
 
 impl Build {
@@ -720,7 +791,6 @@ impl Build {
       installable,
       extra_args: vec![],
       nom: false,
-      builder: None,
     }
   }
 
@@ -739,12 +809,6 @@ impl Build {
   #[must_use]
   pub const fn nom(mut self, yes: bool) -> Self {
     self.nom = yes;
-    self
-  }
-
-  #[must_use]
-  pub fn builder(mut self, builder: Option<String>) -> Self {
-    self.builder = builder;
     self
   }
 
@@ -781,16 +845,10 @@ impl Build {
     let base_command = Exec::cmd("nix")
       .arg("build")
       .args(&installable_args)
-      .args(&match &self.builder {
-        Some(host) => {
-          vec!["--builders".to_string(), format!("ssh://{host} - - - 100")]
-        },
-        None => vec![],
-      })
       .args(&self.extra_args);
 
-    let exit = if self.nom {
-      let cmd = {
+    if self.nom {
+      let pipeline = {
         base_command
           .args(&["--log-format", "internal-json", "--verbose"])
           .stderr(Redirection::Merge)
@@ -798,20 +856,41 @@ impl Build {
           | Exec::cmd("nom").args(&["--json"])
       }
       .stdout(Redirection::None);
-      debug!(?cmd);
-      cmd.join()
+      debug!(?pipeline);
+
+      // Use `popen()` to get access to individual processes so we can check
+      // Nix's exit status, not nom's. The pipeline's `join()` only returns
+      // the exit status of the last command (nom), which always succeeds
+      // even when Nix fails.
+      let mut processes = pipeline.popen()?;
+
+      // Wait for all processes to finish
+      for proc in &mut processes {
+        proc.wait()?;
+      }
+
+      // Check the exit status of the FIRST process (nix build)
+      // This is the one that matters. If Nix fails, we should fail as well
+      if let Some(nix_proc) = processes.first() {
+        if let Some(exit_status) = nix_proc.exit_status() {
+          match exit_status {
+            ExitStatus::Exited(0) => (),
+            other => bail!(ExitError(other)),
+          }
+        }
+      }
     } else {
       let cmd = base_command
         .stderr(Redirection::Merge)
         .stdout(Redirection::None);
 
       debug!(?cmd);
-      cmd.join()
-    };
+      let exit = cmd.join();
 
-    match exit? {
-      ExitStatus::Exited(0) => (),
-      other => bail!(ExitError(other)),
+      match exit? {
+        ExitStatus::Exited(0) => (),
+        other => bail!(ExitError(other)),
+      }
     }
 
     Ok(())
@@ -824,6 +903,12 @@ pub struct ExitError(ExitStatus);
 
 #[cfg(test)]
 mod tests {
+  #![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::unreachable,
+    reason = "Fine in tests"
+  )]
   use std::{env, ffi::OsString};
 
   use serial_test::serial;
@@ -842,7 +927,7 @@ mod tests {
       unsafe {
         env::set_var(key, value);
       }
-      EnvGuard {
+      Self {
         key: key.to_string(),
         original,
       }
@@ -896,7 +981,6 @@ mod tests {
       .dry(true)
       .show_output(true)
       .elevate(Some(ElevationStrategy::Force("sudo")))
-      .ssh(Some("host".to_string()))
       .message("test message")
       .arg("arg1")
       .args(["arg2", "arg3"]);
@@ -904,7 +988,6 @@ mod tests {
     assert!(cmd.dry);
     assert!(cmd.show_output);
     assert_eq!(cmd.elevate, Some(ElevationStrategy::Force("sudo")));
-    assert_eq!(cmd.ssh, Some("host".to_string()));
     assert_eq!(cmd.message, Some("test message".to_string()));
     assert_eq!(cmd.args, vec![
       OsString::from("arg1"),
@@ -1084,11 +1167,10 @@ mod tests {
       .build_sudo_cmd()
       .expect("build_sudo_cmd should succeed in test");
 
-    // Platform-agnostic: 'sudo' may not be the first token if env vars are
-    // injected (e.g., NH_SUDO_ASKPASS). Accept any command line where
-    // 'sudo' is present as a token.
+    // Platform-agnostic: 'sudo' may be a full path or just the program name.
+    // Accept any command line where a token ends with 'sudo'.
     let cmdline = sudo_exec.to_cmdline_lossy();
-    assert!(cmdline.split_whitespace().any(|tok| tok == "sudo"));
+    assert!(cmdline.split_whitespace().any(|tok| tok.ends_with("sudo")));
   }
 
   #[test]
@@ -1151,6 +1233,42 @@ mod tests {
     // Should contain env command with variable
     assert!(cmdline.contains("env"));
     assert!(cmdline.contains("TEST_VAR=test_value"));
+  }
+
+  #[test]
+  fn test_elevation_strategy_passwordless_resolves() {
+    let strategy = ElevationStrategy::Passwordless;
+    let result = strategy.resolve();
+
+    // Passwordless should resolve to an elevation program just like Auto
+    assert!(result.is_ok());
+    let program = result.unwrap();
+    assert!(!program.as_os_str().is_empty());
+  }
+
+  #[test]
+  fn test_elevation_strategy_arg_program_prefix_parsing() {
+    let parsed = "program:/path/to/bin".parse::<ElevationStrategyArg>();
+    assert!(parsed.is_ok());
+    match parsed.unwrap() {
+      ElevationStrategyArg::Program(path) => {
+        assert_eq!(path, PathBuf::from("/path/to/bin"));
+      },
+      _ => unreachable!("Expected Program variant"),
+    }
+  }
+
+  #[test]
+  fn test_build_sudo_cmd_force_no_stdin() {
+    let cmd =
+      Command::new("test").elevate(Some(ElevationStrategy::Force("sudo")));
+
+    let sudo_exec =
+      cmd.build_sudo_cmd().expect("build_sudo_cmd should succeed");
+    let cmdline = sudo_exec.to_cmdline_lossy();
+
+    // Force("sudo") uses regular sudo without --stdin or --prompt flags
+    assert!(cmdline.contains("sudo"));
   }
 
   #[test]
@@ -1250,7 +1368,6 @@ mod tests {
     assert_eq!(build.installable.to_args(), installable.to_args());
     assert!(build.extra_args.is_empty());
     assert!(!build.nom);
-    assert!(build.builder.is_none());
   }
 
   #[test]
@@ -1264,8 +1381,7 @@ mod tests {
       .message("Building package")
       .extra_arg("--verbose")
       .extra_args(["--option", "setting", "value"])
-      .nom(true)
-      .builder(Some("build-host".to_string()));
+      .nom(true);
 
     assert_eq!(build.message, Some("Building package".to_string()));
     assert_eq!(build.extra_args, vec![
@@ -1275,7 +1391,6 @@ mod tests {
       OsString::from("value")
     ]);
     assert!(build.nom);
-    assert_eq!(build.builder, Some("build-host".to_string()));
   }
 
   #[test]
@@ -1312,27 +1427,27 @@ mod tests {
 
   #[test]
   fn test_parse_cmdline_simple() {
-    let result = parse_cmdline_with_quotes("cmd arg1 arg2 arg3");
+    let result = shlex::split("cmd arg1 arg2 arg3").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg1", "arg2", "arg3"]);
   }
 
   #[test]
   fn test_parse_cmdline_with_single_quotes() {
-    let result = parse_cmdline_with_quotes("cmd 'arg with spaces' arg2");
+    let result = shlex::split("cmd 'arg with spaces' arg2").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg with spaces", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_with_double_quotes() {
-    let result = parse_cmdline_with_quotes(r#"cmd "arg with spaces" arg2"#);
+    let result =
+      shlex::split(r#"cmd "arg with spaces" arg2"#).unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg with spaces", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_mixed_quotes() {
-    let result = parse_cmdline_with_quotes(
-      r#"cmd 'single quoted' "double quoted" normal"#,
-    );
+    let result = shlex::split(r#"cmd 'single quoted' "double quoted" normal"#)
+      .unwrap_or_default();
     assert_eq!(result, vec![
       "cmd",
       "single quoted",
@@ -1343,8 +1458,8 @@ mod tests {
 
   #[test]
   fn test_parse_cmdline_with_equals_in_quotes() {
-    let result =
-      parse_cmdline_with_quotes("sudo env 'PATH=/path/with spaces' /bin/cmd");
+    let result = shlex::split("sudo env 'PATH=/path/with spaces' /bin/cmd")
+      .unwrap_or_default();
     assert_eq!(result, vec![
       "sudo",
       "env",
@@ -1355,33 +1470,33 @@ mod tests {
 
   #[test]
   fn test_parse_cmdline_multiple_spaces() {
-    let result = parse_cmdline_with_quotes("cmd    arg1     arg2");
+    let result = shlex::split("cmd    arg1     arg2").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg1", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_leading_trailing_spaces() {
-    let result = parse_cmdline_with_quotes("  cmd arg1 arg2  ");
+    let result = shlex::split("  cmd arg1 arg2  ").unwrap_or_default();
     assert_eq!(result, vec!["cmd", "arg1", "arg2"]);
   }
 
   #[test]
   fn test_parse_cmdline_empty_string() {
-    let result = parse_cmdline_with_quotes("");
+    let result = shlex::split("").unwrap_or_default();
     assert_eq!(result, Vec::<String>::default());
   }
 
   #[test]
   fn test_parse_cmdline_only_spaces() {
-    let result = parse_cmdline_with_quotes("   ");
+    let result = shlex::split("   ").unwrap_or_default();
     assert_eq!(result, Vec::<String>::default());
   }
 
   #[test]
   fn test_parse_cmdline_realistic_sudo() {
     let cmdline =
-      r#"/usr/bin/sudo env 'PATH=/path with spaces' /usr/bin/nh clean all"#;
-    let result = parse_cmdline_with_quotes(cmdline);
+      r"/usr/bin/sudo env 'PATH=/path with spaces' /usr/bin/nh clean all";
+    let result = shlex::split(cmdline).unwrap_or_default();
     assert_eq!(result, vec![
       "/usr/bin/sudo",
       "env",
@@ -1455,7 +1570,76 @@ mod tests {
       (EnvAction::Set(orig_val), EnvAction::Set(cloned_val)) => {
         assert_eq!(orig_val, cloned_val);
       },
+      #[allow(clippy::unreachable, reason = "Should never happen")]
       _ => unreachable!("Clone should preserve variant and value"),
     }
+  }
+
+  #[test]
+  fn test_parse_cmdline_escaped_quotes() {
+    // shlex handles backslash escapes within double quotes
+    let result =
+      shlex::split(r#"cmd "arg with \"escaped\" quotes""#).unwrap_or_default();
+    assert_eq!(result, vec!["cmd", r#"arg with "escaped" quotes"#]);
+  }
+
+  #[test]
+  fn test_parse_cmdline_nested_quotes() {
+    // Single quotes inside double quotes are preserved literally
+    let result = shlex::split(r#"cmd "it's a test""#).unwrap_or_default();
+    assert_eq!(result, vec!["cmd", "it's a test"]);
+  }
+
+  #[test]
+  fn test_parse_cmdline_backslash_outside_quotes() {
+    // Backslash escapes space outside quotes
+    let result = shlex::split(r"cmd arg\ with\ space").unwrap_or_default();
+    assert_eq!(result, vec!["cmd", "arg with space"]);
+  }
+
+  #[test]
+  fn test_parse_cmdline_nix_store_paths() {
+    // Typical nix store paths should work
+    let result = shlex::split(
+      "/nix/store/abc123-foo/bin/cmd --flag /nix/store/def456-bar",
+    )
+    .unwrap_or_default();
+    assert_eq!(result, vec![
+      "/nix/store/abc123-foo/bin/cmd",
+      "--flag",
+      "/nix/store/def456-bar"
+    ]);
+  }
+
+  #[test]
+  fn test_parse_cmdline_env_vars_in_quotes() {
+    // Environment variable syntax should be preserved
+    let result =
+      shlex::split(r#"env "PATH=$HOME/bin:$PATH" cmd"#).unwrap_or_default();
+    assert_eq!(result, vec!["env", "PATH=$HOME/bin:$PATH", "cmd"]);
+  }
+
+  #[test]
+  fn test_parse_cmdline_unclosed_quote_returns_none() {
+    // shlex returns None for unclosed quotes, we return empty vec
+    let result = shlex::split("cmd 'unclosed").unwrap_or_default();
+    assert_eq!(result, Vec::<String>::default());
+  }
+
+  #[test]
+  fn test_parse_cmdline_complex_sudo_command() {
+    // Complex sudo command with multiple quoted args
+    let cmdline = r#"/usr/bin/sudo -E env 'HOME=/root' "PATH=/usr/bin" /usr/bin/nh os switch"#;
+    let result = shlex::split(cmdline).unwrap_or_default();
+    assert_eq!(result, vec![
+      "/usr/bin/sudo",
+      "-E",
+      "env",
+      "HOME=/root",
+      "PATH=/usr/bin",
+      "/usr/bin/nh",
+      "os",
+      "switch"
+    ]);
   }
 }
