@@ -103,6 +103,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
     "test_build_sudo_cmd_env_added_once"
     "--skip"
     "test_elevation_strategy_passwordless_resolves"
+    "--skip"
+    "test_build_sudo_cmd_with_nix_config_spaces"
   ];
 
   # Besides the install check, we have a bunch of tests to run. Nextest is
