@@ -1247,17 +1247,15 @@ fn activate_nixos_remote(
           ssh_cmd.stdin(format!("{}\n", password.expose_secret()).as_str());
       }
 
-      if config.show_logs {
-        ssh_cmd = ssh_cmd
-          .stdout(Redirection::Merge)
-          .stderr(Redirection::Merge);
-      }
-
       debug!(?ssh_cmd, "Activating NixOS configuration");
 
       let capture = ssh_cmd
         .capture()
         .wrap_err("Failed to activate NixOS configuration")?;
+
+      if config.show_logs {
+        println!("{}", capture.stdout_str());
+      }
 
       if !capture.exit_status.success() {
         bail!(
