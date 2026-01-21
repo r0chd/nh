@@ -1093,18 +1093,23 @@ fn has_elevation_status(
 }
 
 fn find_previous_generation() -> Result<generations::GenerationInfo> {
-  let generations = list_generations()?;
-  if generations.is_empty() {
-    bail!("No generations found");
-  }
+  let current_number = get_current_generation_number()?;
 
-  let current_idx = get_current_generation_number()? as usize;
+  let mut generations = list_generations()?;
+
+  let Some(current_idx) =
+    generations.iter().position(|g| g.number == current_number)
+  else {
+    bail!("Current generation not found");
+  };
 
   if current_idx == 0 {
     bail!("No generation older than the current one exists");
   }
 
-  Ok(generations[current_idx - 1].clone())
+  let previous_generation = generations.swap_remove(current_idx - 1);
+
+  Ok(previous_generation)
 }
 
 fn find_generation_by_number(
@@ -1112,7 +1117,7 @@ fn find_generation_by_number(
 ) -> Result<generations::GenerationInfo> {
   list_generations()?
     .into_iter()
-    .find(|g| g.number == number.to_string())
+    .find(|g| g.number == number)
     .ok_or_else(|| eyre!("Generation {} not found", number))
 }
 
@@ -1123,10 +1128,7 @@ fn get_current_generation_number() -> Result<u64> {
     .find(|g| g.current)
     .ok_or_else(|| eyre!("Current generation not found"))?;
 
-  current_gen
-    .number
-    .parse::<u64>()
-    .wrap_err("Invalid generation number")
+  Ok(current_gen.number)
 }
 
 fn list_generations() -> Result<Vec<generations::GenerationInfo>> {
@@ -1159,7 +1161,9 @@ fn list_generations() -> Result<Vec<generations::GenerationInfo>> {
     bail!("No generations found");
   }
 
-  generations.sort_by_key(|g| g.number.parse::<u64>().unwrap_or(0));
+  tracing::debug!("{} generations found", generations.len());
+
+  generations.sort_by_key(|g| g.number);
 
   Ok(generations)
 }

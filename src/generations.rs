@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 #[derive(Debug, Clone)]
 pub struct GenerationInfo {
   /// Number of a generation
-  pub number: String,
+  pub number: u64,
 
   /// Date on switch a generation was built
   pub date: String,
@@ -277,7 +277,7 @@ pub fn describe(generation_dir: &Path) -> Option<GenerationInfo> {
     .and_then(|p| fs::canonicalize(p).ok())
   else {
     return Some(GenerationInfo {
-      number: generation_number.to_string(),
+      number: generation_number,
       date: build_date,
       nixos_version,
       kernel_version,
@@ -293,7 +293,7 @@ pub fn describe(generation_dir: &Path) -> Option<GenerationInfo> {
     .and_then(|p| fs::canonicalize(p).ok())
   else {
     return Some(GenerationInfo {
-      number: generation_number.to_string(),
+      number: generation_number,
       date: build_date,
       nixos_version,
       kernel_version,
@@ -307,7 +307,7 @@ pub fn describe(generation_dir: &Path) -> Option<GenerationInfo> {
   let current = run_current_target == gen_store_path;
 
   Some(GenerationInfo {
-    number: generation_number.to_string(),
+    number: generation_number,
     date: build_date,
     nixos_version,
     kernel_version,
@@ -342,8 +342,7 @@ pub fn print_info(
   }
 
   // Sort generations by numeric value of the generation number
-  generations
-    .sort_by_key(|generation| generation.number.parse::<u64>().unwrap_or(0));
+  generations.sort_by_key(|generation| generation.number);
 
   let current_generation =
     generations.iter().find(|generation| generation.current);
@@ -402,15 +401,15 @@ pub fn print_info(
     .max()
     .unwrap_or(12); // arbitrary value
 
-  let max_generation_no = generations
+  let max_generation_no_len = generations
     .iter()
-    .map(|g| g.number.len())
+    .map(|g| g.number.to_string().len())
     .max()
     .unwrap_or(5);
 
   let widths = ColumnWidths {
-    id:      max_generation_no + 10, // "Generation No"
-    date:    20,                     // "Build Date"
+    id:      max_generation_no_len + 10, // "Generation No"
+    date:    20,                         // "Build Date"
     nver:    max_nixos_version_len,
     kernel:  max_kernel_len,
     confrev: 22, // "Configuration Revision"
